@@ -1,0 +1,168 @@
+Metadata-Version: 2.4
+Name: locul3d
+Version: 0.1.0
+Summary: Locul3D — The Place in 3D. A modular point cloud viewer and annotation editor.
+Author: Locul3D
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/locul3d/locul3d
+Project-URL: Repository, https://github.com/locul3d/locul3d
+Project-URL: Issues, https://github.com/locul3d/locul3d/issues
+Keywords: 3d,point-cloud,lidar,annotation,viewer,editor,qt,opengl
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: X11 Applications :: Qt
+Classifier: Intended Audience :: Science/Research
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Scientific/Engineering :: Visualization
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.20.0
+Requires-Dist: PySide6>=6.0.0
+Requires-Dist: PyOpenGL>=3.1.0
+Requires-Dist: open3d>=0.17.0
+Requires-Dist: scipy>=1.10.0
+Provides-Extra: e57
+Requires-Dist: pye57>=0.2.0; extra == "e57"
+Requires-Dist: Pillow>=10.0.0; extra == "e57"
+Dynamic: license-file
+
+# 🌐 Locul3D — *The Place in 3D*
+
+> A fast, modern 3D point cloud viewer and bounding box annotation editor.
+> Built with Qt + OpenGL for interactive LiDAR/scan data exploration.
+
+<p align="center">
+  <strong>View</strong> · <strong>Annotate</strong> · <strong>Explore</strong>
+</p>
+
+---
+
+## ✨ Features
+
+| | |
+|---|---|
+| 🔭 **Real-time 3D Viewer** | Point clouds, meshes, wireframes — rendered with OpenGL |
+| 📦 **BBox Annotation Editor** | Click-to-place bounding boxes with move/rotate/scale gizmos |
+| 🗂️ **Layer System** | Organize, toggle, and color-code your data layers |
+| 📂 **Multi-format** | PLY, OBJ, E57 — load files or entire folders |
+| 🌗 **Auto Dark/Light Theme** | Follows your OS appearance automatically |
+| ⌨️ **Blender-style Shortcuts** | Q/G/R/S for tools, X/Y/Z for axis constraints |
+| ↩️ **Undo/Redo** | Full undo stack for annotation work |
+| 💾 **JSON/YAML Export** | Save and reload annotations |
+
+---
+
+## 🚀 Quick Start
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Launch viewer
+python start.py
+
+# Launch annotation editor
+python start.py editor
+
+# Open a file directly
+python start.py output/stage3/
+```
+
+---
+
+## 🎮 Controls
+
+### Viewer
+
+| Action | Input |
+|--------|-------|
+| Orbit camera | Left drag |
+| Pan camera | Middle drag / Shift+Left drag |
+| Zoom | Scroll / Right drag |
+| Fit to scene | `F` |
+| Toggle grid | `G` |
+| Toggle axes | `A` |
+| Open file | `Ctrl+O` |
+| Open folder | `Ctrl+Shift+O` |
+
+### Editor (all viewer controls plus)
+
+| Action | Input |
+|--------|-------|
+| Place new bbox | `Ctrl+Click` |
+| Select tool | `Q` |
+| Move tool | `G` |
+| Rotate tool | `R` |
+| Scale tool | `S` |
+| Axis constraint | `X` / `Y` / `Z` |
+| Delete bbox | `Delete` |
+| Undo | `Ctrl+Z` |
+| Duplicate | `Ctrl+D` |
+
+---
+
+## 📦 Installation
+
+### Requirements
+
+- Python 3.8+
+- PySide6, PyOpenGL, NumPy, Open3D, SciPy
+
+```bash
+pip install -r requirements.txt
+```
+
+### Optional: E57 Support
+
+```bash
+pip install pye57 Pillow
+```
+
+### Package Install (editable)
+
+```bash
+pip install -e .
+```
+
+Then use anywhere:
+
+```bash
+python -m locul3d               # viewer (default)
+python -m locul3d editor        # annotation editor
+locul3d-viewer                  # viewer via entry point
+locul3d-editor                  # editor via entry point
+```
+
+---
+
+## 🏗️ Architecture
+
+```
+locul3d/
+├── start.py          ← Launch here
+├── src/locul3d/      ← Python package
+│   ├── viewer/       ← 3D viewer application
+│   ├── editor/       ← BBox annotation editor
+│   └── ...           ← Core, rendering, UI modules
+└── ../src/           ← Original engine (viewer_qt.py, bbox_editor.py)
+```
+
+The package wraps a battle-tested OpenGL engine with a clean, modular Python interface.
+
+---
+
+## 📄 License
+
+MIT
+
+---
+
+<p align="center">
+  <em>Locul3D — from Romanian "locul" (the place) + 3D</em>
+</p>

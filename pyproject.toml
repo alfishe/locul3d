@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "locul3d"
+version = "0.1.0"
+description = "Locul3D — The Place in 3D. A modular point cloud viewer and annotation editor."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    {name = "Locul3D"},
+]
+keywords = ["3d", "point-cloud", "lidar", "annotation", "viewer", "editor", "qt", "opengl"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "numpy>=1.20.0",
+    "PySide6>=6.0.0",
+    "PyOpenGL>=3.1.0",
+    "open3d>=0.17.0",
+    "scipy>=1.10.0",
+    "pye57>=0.4.0",
+    "Pillow>=9.0.0",
+]
+
+[project.scripts]
+locul3d = "locul3d.__main__:main"
+locul3d-viewer = "locul3d.viewer.main:main"
+locul3d-editor = "locul3d.editor.main:main"
+
+[project.urls]
+Homepage = "https://github.com/alfishe/locul3d"
+Repository = "https://github.com/alfishe/locul3d"
+Issues = "https://github.com/alfishe/locul3d/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+locul3d = ["**/*.yaml", "**/*.json"]
