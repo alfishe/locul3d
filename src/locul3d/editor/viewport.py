@@ -84,8 +84,8 @@ class EditorViewport(BaseGLViewport):
 
         # Save GL matrices for hit testing (after scene correction is applied)
         from OpenGL.GL import glGetFloatv, glGetIntegerv, GL_MODELVIEW_MATRIX, GL_PROJECTION_MATRIX, GL_VIEWPORT
-        self._gl_modelview = glGetFloatv(GL_MODELVIEW_MATRIX)
-        self._gl_projection = glGetFloatv(GL_PROJECTION_MATRIX)
+        self._gl_modelview = np.array(glGetFloatv(GL_MODELVIEW_MATRIX), dtype=np.float64)
+        self._gl_projection = np.array(glGetFloatv(GL_PROJECTION_MATRIX), dtype=np.float64)
         self._gl_viewport = glGetIntegerv(GL_VIEWPORT)
 
         # Draw annotations
