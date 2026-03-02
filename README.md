@@ -124,7 +124,7 @@ All six axes are supported: `--rotate-x`, `--rotate-y`, `--rotate-z`, `--shift-x
 
 ### Requirements
 
-- Python 3.11+
+- Python 3.9+
 - PySide6, PyOpenGL, NumPy, Open3D, SciPy, pye57, Pillow
 
 ```bash

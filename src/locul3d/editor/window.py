@@ -54,6 +54,7 @@ class EditorWindow(QMainWindow):
         self.planes: List[PlaneItem] = []
         self._color_idx = 0
         self._plane_color_idx = 0
+        self._undo_stack = []
 
         # Coordinate system
         self._coord_mode = "scene"  # "scene" = absolute, "relative" = from ref point
@@ -509,7 +510,7 @@ class EditorWindow(QMainWindow):
         self._color_idx += 1
         bbox = BBoxItem(label=label, center=center, size=size, color=color)
         self.annotations.append(bbox)
-        self.gl_viewport.push_undo('create', {'idx': len(self.annotations) - 1})
+        self._push_undo('create', {'idx': len(self.annotations) - 1})
         self.bbox_panel.rebuild_list()
         idx = len(self.annotations) - 1
         self.bbox_panel.select_bbox(idx)
@@ -524,7 +525,7 @@ class EditorWindow(QMainWindow):
     def _delete_bbox(self, idx):
         if idx < 0 or idx >= len(self.annotations):
             return
-        self.gl_viewport.push_undo('delete', {
+        self._push_undo('delete', {
             'idx': idx, 'bbox': copy.deepcopy(self.annotations[idx])})
         self.annotations.pop(idx)
         self.gl_viewport.selected_idx = -1
@@ -534,7 +535,7 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(f"Deleted bbox [{idx}]")
 
     def _undo(self):
-        action = self.gl_viewport.pop_undo()
+        action = self._pop_undo()
         if action is None:
             return
         act_type, data = action
@@ -556,6 +557,14 @@ class EditorWindow(QMainWindow):
         self.bbox_panel.select_bbox(-1)
         self.gl_viewport.update()
         self.status_label.setText("Undo")
+
+    def _push_undo(self, action_type, data):
+        self._undo_stack.append((action_type, data))
+
+    def _pop_undo(self):
+        if not self._undo_stack:
+            return None
+        return self._undo_stack.pop()
 
     # ------------------------------------------------------------------
     # Plane operations

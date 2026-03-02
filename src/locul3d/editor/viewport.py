@@ -90,12 +90,12 @@ class EditorViewport(BaseGLViewport):
         from ..core.constants import AABB_EDGES
         
         try:
-            from OpenGL.GL import glDisable, glDepthTest, glLineWidth, glBegin, glEnd
+            from OpenGL.GL import glDisable, glEnable, glLineWidth, glBegin, glEnd, GL_DEPTH_TEST
         except ImportError:
             return
 
         glDisable(GL_LIGHTING)
-        glDepthTest(GL_FALSE)
+        glDisable(GL_DEPTH_TEST)
 
         for i, bbox in enumerate(self.annotations):
             if not bbox.visible:
@@ -117,7 +117,7 @@ class EditorViewport(BaseGLViewport):
                 glVertex3dv(corners[b])
             glEnd()
 
-        glDepthTest(GL_TRUE)
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
     def _draw_planes(self, planes=None):
@@ -173,12 +173,12 @@ class EditorViewport(BaseGLViewport):
             return
 
         try:
-            from OpenGL.GL import glDisable, glLineWidth, glBegin, glEnd
+            from OpenGL.GL import glDisable, glEnable, glLineWidth, glBegin, glEnd, GL_DEPTH_TEST
         except ImportError:
             return
 
         glDisable(GL_LIGHTING)
-        glDepthTest(GL_FALSE)
+        glDisable(GL_DEPTH_TEST)
         glLineWidth(2.5)
 
         rp = self.ref_point
@@ -196,7 +196,7 @@ class EditorViewport(BaseGLViewport):
                                                  sz if axis == 2 else 0]))
             glEnd()
 
-        glDepthTest(GL_TRUE)
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
     def _gizmo_len(self, bbox):
