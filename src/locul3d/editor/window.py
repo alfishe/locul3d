@@ -102,6 +102,7 @@ class EditorWindow(QMainWindow):
         self.gl_viewport.point_picked.connect(self._on_point_picked)
         self.gl_viewport.bbox_selected.connect(self._on_bbox_selected)
         self.gl_viewport.bbox_moved.connect(self._on_bbox_moved)
+        self.gl_viewport.transform_committed.connect(self._on_transform_committed)
 
         # Marker click in viewport → select in layer panel (no info panel)
         self.gl_viewport.marker_selected.connect(
@@ -565,6 +566,15 @@ class EditorWindow(QMainWindow):
         if not self._undo_stack:
             return None
         return self._undo_stack.pop()
+
+    def _on_transform_committed(self, idx, snapshot):
+        """Called before a gizmo drag starts — push pre-drag state for undo."""
+        self._push_undo('transform', {
+            'idx': idx,
+            'center': snapshot['center'],
+            'size': snapshot['size'],
+            'rotation_z': snapshot['rotation_z'],
+        })
 
     # ------------------------------------------------------------------
     # Plane operations

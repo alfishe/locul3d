@@ -1,21 +1,26 @@
 """Editor-specific viewport extending base with annotation capabilities."""
 
+import math
 import numpy as np
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QMouseEvent
 
-from ..core.constants import COLORS, TOOL_SELECT
+from ..core.constants import COLORS, TOOL_SELECT, TOOL_MOVE, TOOL_ROTATE, TOOL_SCALE
+from ..core.constants import AXIS_COLORS, AABB_EDGES, GIZMO_HIT_PX
 from ..core.geometry import BBoxItem, PlaneItem
 from ..core.layer import LayerManager
 from ..rendering.gl.viewport import BaseGLViewport
-from ..rendering.gizmos import GizmoSystem
+from ..utils.math import project_to_screen, ray_from_mouse, ray_aabb_intersect
 
 try:
     from OpenGL.GL import *
     from OpenGL.GL import GL_LIGHTING
+    from OpenGL.GLU import gluProject
+    HAS_OPENGL = True
 except ImportError:
-    pass
+    HAS_OPENGL = False
 
 
 class EditorViewport(BaseGLViewport):
@@ -25,6 +30,7 @@ class EditorViewport(BaseGLViewport):
     bbox_selected = Signal(int)
     bbox_moved = Signal(int)
     point_picked = Signal(float, float, float)
+    transform_committed = Signal(int, dict)  # idx, {center, size, rotation_z}
 
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(layer_manager, parent)
@@ -38,13 +44,34 @@ class EditorViewport(BaseGLViewport):
         self.tool = TOOL_SELECT
         self.axis_constraint = None  # 0=X, 1=Y, 2=Z, None=free
 
-        # Gizmo system
-        self.gizmo = GizmoSystem()
-
         # Reference point
         self.ref_point: Optional[np.ndarray] = None
+        self._picking_ref_point = False
 
-    # --- Rendering Overrides ---
+        # Gizmo hover state
+        self._hovered_gizmo = None  # ('move',axis,sign)|('scale',axis,sign)|('rotate',2,0)|None
+
+        # Drag state
+        self._drag_mode: Optional[str] = None  # 'move'|'rotate'|'gizmo_move'|'gizmo_scale'|'gizmo_rotate'|None
+        self._drag_start = None
+        self._drag_orig_center = None
+        self._drag_orig_size = None
+        self._drag_orig_rot = 0.0
+        self._drag_plane_z = 0.0
+        self._drag_axis: int = 0
+        self._drag_sign: int = 1
+
+        # Saved GL matrices (updated each paint)
+        self._gl_modelview = None
+        self._gl_projection = None
+        self._gl_viewport = None
+
+        self.setMouseTracking(True)  # needed for hover detection
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    # ------------------------------------------------------------------
+    # Rendering Overrides
+    # ------------------------------------------------------------------
 
     def _draw_global_overlays(self):
         """Save the pre-correction modelview matrix for later use."""
@@ -54,15 +81,20 @@ class EditorViewport(BaseGLViewport):
     def _paintGL_inner(self):
         """Paint editor viewport with annotations overlay."""
         super()._paintGL_inner()
-        
+
+        # Save GL matrices for hit testing (after scene correction is applied)
+        from OpenGL.GL import glGetFloatv, glGetIntegerv, GL_MODELVIEW_MATRIX, GL_PROJECTION_MATRIX, GL_VIEWPORT
+        self._gl_modelview = glGetFloatv(GL_MODELVIEW_MATRIX)
+        self._gl_projection = glGetFloatv(GL_PROJECTION_MATRIX)
+        self._gl_viewport = glGetIntegerv(GL_VIEWPORT)
+
         # Draw annotations
         self._draw_annotations()
-        
-        # Draw gizmo for selected bbox
+
+        # Draw gizmo for selected bbox (move arrows + scale handles + rotation ring)
         if self.selected_idx >= 0 and self.selected_idx < len(self.annotations):
             bbox = self.annotations[self.selected_idx]
-            self.gizmo.draw_move_gizmo(bbox.center_pos, self._gizmo_len(bbox), self.gizmo.hovered_gizmo)
-            self.gizmo.draw_rotate_gizmo(bbox.center_pos, bbox.size, self.gizmo.hovered_gizmo)
+            self._draw_gizmo(bbox)
 
         # Scene-coord planes: drawn inside correction (already active)
         scene_planes = [p for p in self.planes if p.visible and not p.global_coords]
@@ -87,8 +119,6 @@ class EditorViewport(BaseGLViewport):
         if not self.annotations:
             return
 
-        from ..core.constants import AABB_EDGES
-        
         try:
             from OpenGL.GL import glDisable, glEnable, glLineWidth, glBegin, glEnd, GL_DEPTH_TEST
         except ImportError:
@@ -100,21 +130,119 @@ class EditorViewport(BaseGLViewport):
         for i, bbox in enumerate(self.annotations):
             if not bbox.visible:
                 continue
-            
+
             selected = (i == self.selected_idx)
             glLineWidth(3.0 if selected else 1.5)
-            
+
             if selected:
                 glColor4f(1.0, 1.0, 0.0, 1.0)
             else:
                 r, g, b = bbox.color[:3]
                 glColor4f(r, g, b, 0.85)
-            
+
             corners = bbox.corners()
             glBegin(GL_LINES)
             for a, b in AABB_EDGES:
                 glVertex3dv(corners[a])
                 glVertex3dv(corners[b])
+            glEnd()
+
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
+    def _draw_gizmo(self, bbox):
+        """Draw UE-style gizmo: move arrows, scale cubes, rotation ring."""
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        c = bbox.center_pos
+        gl = self._gizmo_len(bbox)
+        hov = self._hovered_gizmo
+        ah = gl * 0.12  # arrow head size
+        sh = gl * 0.06  # scale handle half-size
+
+        # --- Move arrows: lines from center with cone tips ---
+        for axis in range(3):
+            is_hov = (hov is not None and hov[0] == 'move' and hov[1] == axis)
+            r, g, b = AXIS_COLORS[axis]
+            if is_hov:
+                r, g, b = 1.0, 1.0, 0.3
+            glLineWidth(3.5 if is_hov else 2.0)
+            glColor4f(r, g, b, 1.0)
+            tip = c.copy()
+            tip[axis] += gl
+            glBegin(GL_LINES)
+            glVertex3dv(c)
+            glVertex3dv(tip)
+            glEnd()
+            # Arrow cone
+            perp1 = (axis + 1) % 3
+            perp2 = (axis + 2) % 3
+            base = c.copy()
+            base[axis] += gl - ah
+            glBegin(GL_TRIANGLES)
+            for sign1, sign2 in [(1, 0), (0, 1), (-1, 0), (0, -1)]:
+                b1 = base.copy()
+                b1[perp1] += sign1 * ah * 0.4
+                b1[perp2] += sign2 * ah * 0.4
+                next_s = [(0, 1), (-1, 0), (0, -1), (1, 0)]
+                idx = [(1, 0), (0, 1), (-1, 0), (0, -1)].index((sign1, sign2))
+                s1n, s2n = next_s[idx]
+                b2 = base.copy()
+                b2[perp1] += s1n * ah * 0.4
+                b2[perp2] += s2n * ah * 0.4
+                glVertex3dv(tip)
+                glVertex3dv(b1)
+                glVertex3dv(b2)
+            glEnd()
+
+        # --- Scale handles: small cubes at face centers ---
+        for axis in range(3):
+            for sign in (+1, -1):
+                is_hov = (hov is not None and hov[0] == 'scale'
+                          and hov[1] == axis and hov[2] == sign)
+                r, g, b = AXIS_COLORS[axis]
+                if is_hov:
+                    r, g, b = 1.0, 1.0, 0.3
+                glColor4f(r, g, b, 0.9 if is_hov else 0.7)
+                fc = c.copy()
+                fc[axis] += sign * bbox.size[axis] / 2.0
+                p1 = (axis + 1) % 3
+                p2 = (axis + 2) % 3
+                glBegin(GL_QUADS)
+                for s1, s2 in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
+                    v = fc.copy()
+                    v[p1] += s1 * sh
+                    v[p2] += s2 * sh
+                    glVertex3dv(v)
+                glEnd()
+                # Outline
+                glLineWidth(2.0 if is_hov else 1.0)
+                glColor4f(r, g, b, 1.0)
+                glBegin(GL_LINE_LOOP)
+                for s1, s2 in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
+                    v = fc.copy()
+                    v[p1] += s1 * sh
+                    v[p2] += s2 * sh
+                    glVertex3dv(v)
+                glEnd()
+
+        # --- Rotation ring ---
+        is_rot_hov = (hov is not None and hov[0] == 'rotate')
+        radius = max(bbox.size[0], bbox.size[1]) * 0.6
+        if radius > 0.05:
+            if is_rot_hov:
+                glLineWidth(3.0)
+                glColor4f(1.0, 1.0, 0.3, 0.9)
+            else:
+                glLineWidth(1.5)
+                glColor4f(0.3, 0.3, 1.0, 0.6)
+            segments = 48
+            glBegin(GL_LINE_LOOP)
+            for seg in range(segments):
+                angle = 2.0 * math.pi * seg / segments
+                x = c[0] + radius * math.cos(angle)
+                y = c[1] + radius * math.sin(angle)
+                glVertex3d(x, y, c[2])
             glEnd()
 
         glEnable(GL_DEPTH_TEST)
@@ -143,7 +271,7 @@ class EditorViewport(BaseGLViewport):
         for plane in planes:
             if not plane.visible:
                 continue
-            
+
             r, g, b = plane.color[:3]
             corners = plane.corners()
 
@@ -184,8 +312,6 @@ class EditorViewport(BaseGLViewport):
         rp = self.ref_point
         sz = max(0.1, self.cam_distance * 0.01)
 
-        from ..core.constants import AXIS_COLORS
-        
         for axis in range(3):
             r, g, b = AXIS_COLORS[axis]
             glColor4f(r, g, b, 0.9)
@@ -201,3 +327,335 @@ class EditorViewport(BaseGLViewport):
 
     def _gizmo_len(self, bbox):
         return max(0.3, float(np.max(bbox.size)) * 0.6)
+
+    # ------------------------------------------------------------------
+    # Projection helpers
+    # ------------------------------------------------------------------
+
+    def _project_to_screen_local(self, world_point):
+        """Project 3D world point to 2D screen coordinates (Qt convention)."""
+        if self._gl_modelview is None:
+            return 0, 0
+        return project_to_screen(world_point, self._gl_modelview,
+                                 self._gl_projection, self._gl_viewport)
+
+    def _hit_test_gizmo(self, screen_x, screen_y):
+        """Test screen-space proximity to gizmo handles.
+        Returns (operation, axis, sign) or None.
+        """
+        if self.selected_idx < 0 or self.selected_idx >= len(self.annotations):
+            return None
+        if self._gl_modelview is None:
+            return None
+
+        bbox = self.annotations[self.selected_idx]
+        c = bbox.center_pos
+        gizmo_len = self._gizmo_len(bbox)
+        thr = GIZMO_HIT_PX
+        best_dist, best_hit = thr + 1, None
+
+        # Scale handles — 6 face centers
+        for axis in range(3):
+            for sign in (+1, -1):
+                handle = c.copy()
+                handle[axis] += sign * bbox.size[axis] / 2.0
+                sx, sy = self._project_to_screen_local(handle)
+                d = math.hypot(screen_x - sx, screen_y - sy)
+                if d < best_dist:
+                    best_dist, best_hit = d, ('scale', axis, sign)
+
+        # Move arrow tips
+        for axis in range(3):
+            tip = c.copy()
+            tip[axis] += gizmo_len
+            sx, sy = self._project_to_screen_local(tip)
+            d = math.hypot(screen_x - sx, screen_y - sy)
+            if d < best_dist:
+                best_dist, best_hit = d, ('move', axis, 0)
+
+        # Rotation ring — sample 24 points
+        radius = max(bbox.size[0], bbox.size[1]) * 0.6
+        if radius > 0.05:
+            for seg in range(24):
+                angle = 2.0 * math.pi * seg / 24
+                ring_pt = np.array([
+                    c[0] + radius * math.cos(angle),
+                    c[1] + radius * math.sin(angle),
+                    c[2],
+                ])
+                sx, sy = self._project_to_screen_local(ring_pt)
+                d = math.hypot(screen_x - sx, screen_y - sy)
+                if d < best_dist:
+                    best_dist, best_hit = d, ('rotate', 2, 0)
+
+        if best_dist <= thr:
+            return best_hit
+        return None
+
+    def _find_nearest_bbox(self, origin, direction):
+        """Ray-cast against all bboxes, return nearest index or -1."""
+        best_t, best_idx = float('inf'), -1
+        for i, bbox in enumerate(self.annotations):
+            if not bbox.visible:
+                continue
+            t = ray_aabb_intersect(origin, direction, bbox.bb_min, bbox.bb_max)
+            if t is not None and t < best_t:
+                best_t, best_idx = t, i
+        return best_idx
+
+    # ------------------------------------------------------------------
+    # Mouse Events
+    # ------------------------------------------------------------------
+
+    def mousePressEvent(self, event: QMouseEvent):
+        pos = event.position()
+        sx, sy = pos.x(), pos.y()
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            mods = event.modifiers()
+
+            # Shift+Click: skip bbox interaction, pass to camera for panning
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                super().mousePressEvent(event)
+                return
+
+            # Reference point picking mode
+            if self._picking_ref_point:
+                self.makeCurrent()
+                pt = self._pick_3d(sx, sy)
+                self.doneCurrent()
+                if pt is not None:
+                    self._picking_ref_point = False
+                    self.point_picked.emit(float(pt[0]), float(pt[1]), float(pt[2]))
+                return
+
+            # Ctrl+Click: pick point → create new bbox (any tool mode)
+            if mods & Qt.KeyboardModifier.ControlModifier:
+                self.makeCurrent()
+                pt = self._pick_3d(sx, sy)
+                self.doneCurrent()
+                if pt is not None:
+                    self.point_picked.emit(float(pt[0]), float(pt[1]), float(pt[2]))
+                return
+
+            # --- Gizmo handle hit test ---
+            if self.selected_idx >= 0 and self.selected_idx < len(self.annotations):
+                self.makeCurrent()
+                ghit = self._hit_test_gizmo(sx, sy)
+                self.doneCurrent()
+                if ghit is not None:
+                    bbox = self.annotations[self.selected_idx]
+                    op, axis, sign = ghit
+                    # Emit undo snapshot before modification
+                    self.transform_committed.emit(self.selected_idx, {
+                        'center': bbox.center_pos.copy(),
+                        'size': bbox.size.copy(),
+                        'rotation_z': bbox.rotation_z,
+                    })
+                    self._drag_start = (sx, sy)
+                    self._drag_orig_center = bbox.center_pos.copy()
+                    self._drag_orig_size = bbox.size.copy()
+                    self._drag_plane_z = float(bbox.center_pos[2])
+
+                    if op == 'move':
+                        self._drag_mode = 'gizmo_move'
+                        self._drag_axis = axis
+                    elif op == 'scale':
+                        self._drag_mode = 'gizmo_scale'
+                        self._drag_axis = axis
+                        self._drag_sign = sign
+                    elif op == 'rotate':
+                        self._drag_mode = 'gizmo_rotate'
+                        self._drag_orig_rot = bbox.rotation_z
+                    return
+
+            # --- Fallback: old tool-mode drags ---
+            if self.tool == TOOL_MOVE and self.selected_idx >= 0:
+                bbox = self.annotations[self.selected_idx]
+                self._drag_mode = 'move'
+                self._drag_start = (sx, sy)
+                self._drag_orig_center = bbox.center_pos.copy()
+                self._drag_orig_size = bbox.size.copy()
+                self._drag_plane_z = float(bbox.center_pos[2])
+                self.transform_committed.emit(self.selected_idx, {
+                    'center': bbox.center_pos.copy(),
+                    'size': bbox.size.copy(),
+                    'rotation_z': bbox.rotation_z,
+                })
+                return
+
+            if self.tool == TOOL_ROTATE and self.selected_idx >= 0:
+                bbox = self.annotations[self.selected_idx]
+                self._drag_mode = 'rotate'
+                self._drag_start = (sx, sy)
+                self._drag_orig_rot = bbox.rotation_z
+                self._drag_orig_center = bbox.center_pos.copy()
+                self._drag_orig_size = bbox.size.copy()
+                self._drag_plane_z = float(bbox.center_pos[2])
+                self.transform_committed.emit(self.selected_idx, {
+                    'center': bbox.center_pos.copy(),
+                    'size': bbox.size.copy(),
+                    'rotation_z': bbox.rotation_z,
+                })
+                return
+
+            # --- Click on bbox to select ---
+            self.makeCurrent()
+            origin, direction = ray_from_mouse(
+                sx, sy, self._gl_modelview, self._gl_projection, self._gl_viewport)
+            self.doneCurrent()
+            hit_idx = self._find_nearest_bbox(origin, direction)
+
+            if hit_idx >= 0:
+                self.selected_idx = hit_idx
+                self.bbox_selected.emit(hit_idx)
+                self.update()
+                self._last_mouse = event.position()
+                self._mouse_btn = event.button()
+                return
+
+            # --- Click on background → deselect ---
+            if self.selected_idx >= 0:
+                self.selected_idx = -1
+                self._hovered_gizmo = None
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                self.bbox_selected.emit(-1)
+                self.update()
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        pos = event.position()
+        sx, sy = pos.x(), pos.y()
+
+        # --- Gizmo drags ---
+        if self._drag_mode == 'gizmo_move' and self.selected_idx >= 0:
+            axis = self._drag_axis
+            c_screen = np.array(self._project_to_screen_local(self._drag_orig_center))
+            axis_end = self._drag_orig_center.copy()
+            axis_end[axis] += 1.0
+            a_screen = np.array(self._project_to_screen_local(axis_end))
+            axis_dir_screen = a_screen - c_screen
+            axis_len_screen = np.linalg.norm(axis_dir_screen)
+            if axis_len_screen > 0.5:
+                axis_dir_screen /= axis_len_screen
+                mouse_delta = np.array([sx - self._drag_start[0], sy - self._drag_start[1]])
+                px_along = np.dot(mouse_delta, axis_dir_screen)
+                world_delta = px_along / axis_len_screen
+                new_center = self._drag_orig_center.copy()
+                new_center[axis] += world_delta
+                self.annotations[self.selected_idx].center_pos = new_center
+                self.bbox_moved.emit(self.selected_idx)
+                self.update()
+            return
+
+        if self._drag_mode == 'gizmo_scale' and self.selected_idx >= 0:
+            axis = self._drag_axis
+            c_screen = np.array(self._project_to_screen_local(self._drag_orig_center))
+            axis_end = self._drag_orig_center.copy()
+            axis_end[axis] += 1.0
+            a_screen = np.array(self._project_to_screen_local(axis_end))
+            axis_dir_screen = a_screen - c_screen
+            axis_len_screen = np.linalg.norm(axis_dir_screen)
+            if axis_len_screen > 0.5:
+                axis_dir_screen /= axis_len_screen
+                mouse_delta = np.array([sx - self._drag_start[0], sy - self._drag_start[1]])
+                px_along = np.dot(mouse_delta, axis_dir_screen)
+                world_delta = px_along / axis_len_screen
+                new_size = self._drag_orig_size.copy()
+                new_size[axis] = max(0.02, self._drag_orig_size[axis] + world_delta * self._drag_sign)
+                self.annotations[self.selected_idx].size = new_size
+                self.bbox_moved.emit(self.selected_idx)
+                self.update()
+            return
+
+        if self._drag_mode == 'gizmo_rotate' and self.selected_idx >= 0:
+            dx = sx - self._drag_start[0]
+            self.annotations[self.selected_idx].rotation_z = self._drag_orig_rot + dx * 0.5
+            self.bbox_moved.emit(self.selected_idx)
+            self.update()
+            return
+
+        # --- Legacy tool-mode drags ---
+        if self._drag_mode == 'move' and self.selected_idx >= 0:
+            if self.axis_constraint is not None:
+                axis = self.axis_constraint
+                c_screen = np.array(self._project_to_screen_local(self._drag_orig_center))
+                axis_end = self._drag_orig_center.copy()
+                axis_end[axis] += 1.0
+                a_screen = np.array(self._project_to_screen_local(axis_end))
+                axis_dir_screen = a_screen - c_screen
+                axis_len_screen = np.linalg.norm(axis_dir_screen)
+                if axis_len_screen > 0.5:
+                    axis_dir_screen /= axis_len_screen
+                    mouse_delta = np.array([sx - self._drag_start[0], sy - self._drag_start[1]])
+                    px_along = np.dot(mouse_delta, axis_dir_screen)
+                    world_delta = px_along / axis_len_screen
+                    new_center = self._drag_orig_center.copy()
+                    new_center[axis] += world_delta
+                    self.annotations[self.selected_idx].center_pos = new_center
+                    self.bbox_moved.emit(self.selected_idx)
+                    self.update()
+            else:
+                from ..utils.math import project_point_to_camera_plane
+                start_world = project_point_to_camera_plane(
+                    self._drag_start[0], self._drag_start[1], self._drag_orig_center,
+                    self._gl_modelview, self._gl_projection, self._gl_viewport)
+                current_world = project_point_to_camera_plane(
+                    sx, sy, self._drag_orig_center,
+                    self._gl_modelview, self._gl_projection, self._gl_viewport)
+                if start_world is not None and current_world is not None:
+                    delta = current_world - start_world
+                    self.annotations[self.selected_idx].center_pos = self._drag_orig_center + delta
+                    self.bbox_moved.emit(self.selected_idx)
+                    self.update()
+            return
+
+        if self._drag_mode == 'rotate' and self.selected_idx >= 0:
+            dx = sx - self._drag_start[0]
+            self.annotations[self.selected_idx].rotation_z = self._drag_orig_rot + dx * 0.5
+            self.bbox_moved.emit(self.selected_idx)
+            self.update()
+            return
+
+        # --- Hover detection (no drag active) ---
+        if self._drag_mode is None and self.selected_idx >= 0:
+            old_hov = self._hovered_gizmo
+            self._hovered_gizmo = self._hit_test_gizmo(sx, sy)
+            if self._hovered_gizmo != old_hov:
+                if self._hovered_gizmo is not None:
+                    op = self._hovered_gizmo[0]
+                    if op == 'move':
+                        self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    elif op == 'scale':
+                        self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                    elif op == 'rotate':
+                        self.setCursor(Qt.CursorShape.CrossCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.ArrowCursor)
+                self.update()
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._drag_mode in ('move', 'rotate', 'gizmo_move', 'gizmo_scale', 'gizmo_rotate'):
+            self._drag_mode = None
+            self._drag_start = None
+            if self.selected_idx >= 0:
+                self.bbox_moved.emit(self.selected_idx)
+            super().mouseReleaseEvent(event)
+            return
+        super().mouseReleaseEvent(event)
+
+    # ------------------------------------------------------------------
+    # Picking
+    # ------------------------------------------------------------------
+
+    def _pick_3d(self, screen_x, screen_y):
+        """Pick a 3D point at the given screen coordinates using depth buffer."""
+        if self._gl_modelview is None:
+            return None
+        from ..utils.math import project_point_to_plane
+        return project_point_to_plane(
+            screen_x, screen_y, 0.0,
+            self._gl_modelview, self._gl_projection, self._gl_viewport)
