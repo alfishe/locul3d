@@ -217,20 +217,16 @@ class BaseGLViewport(QOpenGLWidget):
         """Inner paint implementation - override in subclasses."""
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        # Panorama mode — POC approach: camera pinned to station,
-        # sphere rendered as scene object, layer visibility works naturally.
+        # Panorama mode — render point cloud AND panorama sphere from
+        # the station's exact viewpoint using ONE shared camera setup.
         if self._panorama and self._panorama.is_active:
             pano_layer = self._panorama.active_layer
+
+            # Render scene from station viewpoint (camera + point cloud)
             if pano_layer and pano_layer.pano_position is not None:
-                # Pin camera exactly at station position (zero parallax)
-                pos = pano_layer.pano_position
-                self.cam_target = np.array(pos, dtype=np.float64)
-                self.cam_distance = 0.0
+                self._render_scene_from_station(pano_layer)
 
-            # Render normal scene (all visible layers)
-            self._render_normal_scene()
-
-            # Render panorama sphere on top if layer is visible
+            # Render panorama sphere on top, in the SAME GL matrix
             if pano_layer and pano_layer.visible and pano_layer.opacity > 0.01:
                 self._panorama.paint_in_scene(self._scene_radius)
 
@@ -357,17 +353,10 @@ class BaseGLViewport(QOpenGLWidget):
         # Light at station
         glLightfv(GL_LIGHT0, GL_POSITION, [pos[0], pos[1], pos[2], 1.0])
 
-        # Apply scene correction so point cloud aligns with corrected space
-        sc = self.scene_correction
-        if not sc.is_identity:
-            if sc.rotate_x != 0:
-                glRotatef(sc.rotate_x, 1, 0, 0)
-            if sc.rotate_y != 0:
-                glRotatef(sc.rotate_y, 0, 1, 0)
-            if sc.rotate_z != 0:
-                glRotatef(sc.rotate_z, 0, 0, 1)
-            if sc.shift_x != 0 or sc.shift_y != 0 or sc.shift_z != 0:
-                glTranslatef(sc.shift_x, sc.shift_y, sc.shift_z)
+        # NOTE: SceneCorrection is intentionally NOT applied here.
+        # Both point cloud and panorama positions are in the same
+        # aligned frame from E57 import — applying correction would
+        # shift the scene relative to the camera (at pano_position).
 
         # Render all visible layers (no grid/axes in immersive)
         visible = self.layer_manager.visible_layers()
@@ -744,9 +733,13 @@ class BaseGLViewport(QOpenGLWidget):
             self.cam_target -= right * dx * scale
             self.cam_target += up * dy * scale
         elif self._mouse_btn == Qt.MouseButton.LeftButton:
-            # Left drag = orbit camera
-            self.cam_azimuth -= dx * 0.3
-            self.cam_elevation = max(-89, min(89, self.cam_elevation + dy * 0.3))
+            # Panorama mode: yaw/pitch
+            if self._panorama and self._panorama.is_active:
+                self._panorama.handle_mouse_move(-dx, dy)
+            else:
+                # Left drag = orbit camera
+                self.cam_azimuth -= dx * 0.3
+                self.cam_elevation = max(-89, min(89, self.cam_elevation + dy * 0.3))
         elif self._mouse_btn == Qt.MouseButton.MiddleButton:
             # Middle drag = pan camera
             scale = self.cam_distance * 0.002
@@ -980,6 +973,7 @@ class BaseGLViewport(QOpenGLWidget):
             "fov": self.cam_fov,
         }
         self._panorama.enter(layer, camera_state)
+        self.cam_fov = self._panorama._pano_fov  # sync scene FOV to pano FOV
         self.update()
 
     def exit_panorama(self) -> None:
