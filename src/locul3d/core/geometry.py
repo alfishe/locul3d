@@ -10,11 +10,12 @@ class BBoxItem:
 
     def __init__(self, label="mts_column", center=None, size=None,
                  rotation_z=0.0, color=None, visible=True,
-                 bb_min=None, bb_max=None):
+                 bb_min=None, bb_max=None, fill_opacity=0.0):
         self.label = label
         self.rotation_z = float(rotation_z)  # degrees around Z
         self.color = list(color) if color is not None else list([1.0, 0.5, 0.0])
         self.visible = visible
+        self.fill_opacity = float(fill_opacity)  # 0=wireframe, >0=filled faces
 
         # Accept either center+size or min+max
         if bb_min is not None and bb_max is not None:
@@ -73,27 +74,33 @@ class BBoxItem:
         }
         if self.rotation_z != 0.0:
             d["rotation_z"] = round(float(self.rotation_z), 2)
+        if self.fill_opacity > 0.0:
+            d["fill_opacity"] = round(float(self.fill_opacity), 2)
         return d
 
     @classmethod
     def from_dict(cls, d):
         # Support both center+size and min+max formats
         if "center" in d:
-            return cls(
+            item = cls(
                 label=d.get("label", "custom"),
                 center=d["center"],
                 size=d.get("size", [1, 1, 1]),
                 rotation_z=d.get("rotation_z", 0.0),
                 color=d.get("color"),
             )
+            item.fill_opacity = d.get("fill_opacity", 0.0)
+            return item
         else:
-            return cls(
+            item = cls(
                 label=d.get("label", "custom"),
                 bb_min=d["min"],
                 bb_max=d["max"],
                 rotation_z=d.get("rotation_z", 0.0),
                 color=d.get("color"),
             )
+            item.fill_opacity = d.get("fill_opacity", 0.0)
+            return item
 
     def __repr__(self):
         return f"BBoxItem(label={self.label!r}, center={self.center_pos.tolist()}, size={self.size.tolist()})"

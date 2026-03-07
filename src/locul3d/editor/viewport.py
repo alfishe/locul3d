@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QMouseEvent
 
 from ..core.constants import COLORS, TOOL_SELECT, TOOL_MOVE, TOOL_ROTATE, TOOL_SCALE
-from ..core.constants import AXIS_COLORS, AABB_EDGES, GIZMO_HIT_PX
+from ..core.constants import AXIS_COLORS, AABB_EDGES, AABB_FACES, GIZMO_HIT_PX
 from ..core.geometry import BBoxItem, PlaneItem
 from ..core.layer import LayerManager
 from ..rendering.gl.viewport import BaseGLViewport
@@ -118,18 +118,48 @@ class EditorViewport(BaseGLViewport):
             self._draw_ref_point()
 
     def _draw_annotations(self):
-        """Draw bounding box annotations."""
+        """Draw bounding box annotations (wireframe + optional filled faces)."""
         if not self.annotations:
             return
 
         try:
-            from OpenGL.GL import glDisable, glEnable, glLineWidth, glBegin, glEnd, GL_DEPTH_TEST
+            from OpenGL.GL import (glDisable, glEnable, glLineWidth, glBegin, glEnd,
+                                   GL_DEPTH_TEST, GL_BLEND, glBlendFunc,
+                                   GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                                   glDepthMask, GL_FALSE, GL_TRUE)
         except ImportError:
             return
 
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
 
+        # --- Pass 1: Filled faces (back-to-front is approximate but acceptable) ---
+        has_fills = any(b.visible and b.fill_opacity > 0 for b in self.annotations)
+        if has_fills:
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDepthMask(GL_FALSE)
+
+            for i, bbox in enumerate(self.annotations):
+                if not bbox.visible or bbox.fill_opacity <= 0:
+                    continue
+                r, g, b = bbox.color[:3]
+                alpha = bbox.fill_opacity
+                if i == self.selected_idx:
+                    r, g, b = 1.0, 1.0, 0.0
+                    alpha = min(alpha, 0.5)
+                corners = bbox.corners()
+                glColor4f(r, g, b, alpha)
+                for face in AABB_FACES:
+                    glBegin(GL_QUADS)
+                    for vi in face:
+                        glVertex3dv(corners[vi])
+                    glEnd()
+
+            glDepthMask(GL_TRUE)
+            glDisable(GL_BLEND)
+
+        # --- Pass 2: Wireframe edges ---
         for i, bbox in enumerate(self.annotations):
             if not bbox.visible:
                 continue

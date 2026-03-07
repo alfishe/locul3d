@@ -26,6 +26,16 @@ AABB_EDGES = [
     (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
 ]
 
+# 6 faces of AABB as corner-index quads (matching corners() order)
+AABB_FACES = [
+    (0, 1, 2, 3),  # bottom (-Z)
+    (4, 5, 6, 7),  # top (+Z)
+    (0, 1, 5, 4),  # front (-Y)
+    (2, 3, 7, 6),  # back (+Y)
+    (0, 3, 7, 4),  # left (-X)
+    (1, 2, 6, 5),  # right (+X)
+]
+
 # Layer group definitions: (group_name, classifier_function)
 LAYER_GROUPS = OrderedDict([
     ("Scan", lambda l: l.id in ("aligned", "unclassified", "decimated", "raw_scan")),

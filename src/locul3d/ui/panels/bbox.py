@@ -5,7 +5,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QDoubleSpinBox, QGridLayout,
-    QFrame, QComboBox, QAbstractItemView,
+    QFrame, QComboBox, QAbstractItemView, QSlider,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -240,6 +240,22 @@ class BBoxPanel(QWidget):
         self.rot_z_spin.valueChanged.connect(self._on_rot_changed)
         prop.addWidget(self.rot_z_spin, row, 1, 1, 5)
 
+        # Fill opacity slider
+        row += 1
+        prop.addWidget(self._bold_label("Fill"), row, 0, 1, 6)
+        row += 1
+        fill_row = QHBoxLayout()
+        self.fill_slider = QSlider(Qt.Orientation.Horizontal)
+        self.fill_slider.setRange(0, 100)
+        self.fill_slider.setValue(0)
+        self.fill_slider.setToolTip("Fill surface opacity (0% = wireframe only)")
+        self.fill_slider.valueChanged.connect(self._on_fill_changed)
+        self.fill_label = QLabel("0%")
+        self.fill_label.setFixedWidth(36)
+        fill_row.addWidget(self.fill_slider)
+        fill_row.addWidget(self.fill_label)
+        prop.addLayout(fill_row, row, 0, 1, 6)
+
         # Preset
         row += 1
         prop.addWidget(QLabel("Preset:"), row, 0)
@@ -414,6 +430,9 @@ class BBoxPanel(QWidget):
             self.corner_max_spins[i].setValue(bb_max[i])
 
         self.rot_z_spin.setValue(bbox.rotation_z)
+        fill_pct = int(round(bbox.fill_opacity * 100))
+        self.fill_slider.setValue(fill_pct)
+        self.fill_label.setText(f"{fill_pct}%")
         self._updating = False
 
     # --- Property change handlers ---
@@ -457,6 +476,17 @@ class BBoxPanel(QWidget):
         if idx < 0 or idx >= len(self.annotations):
             return
         self.annotations[idx].rotation_z = self.rot_z_spin.value()
+        self.bbox_changed.emit(idx)
+
+    def _on_fill_changed(self, value):
+        """Handle fill opacity slider change (0–100 → 0.0–1.0)."""
+        self.fill_label.setText(f"{value}%")
+        if self._updating:
+            return
+        idx = self.list_widget.currentRow()
+        if idx < 0 or idx >= len(self.annotations):
+            return
+        self.annotations[idx].fill_opacity = value / 100.0
         self.bbox_changed.emit(idx)
 
     def _on_label_changed(self, text):
