@@ -82,6 +82,9 @@ class BaseGLViewport(QOpenGLWidget):
         self._interacting = False        # mouse-drag orbit/pan
         self._adjusting_opacity = False  # opacity slider being dragged
 
+        # Scene clipping: None = no clip, or (x0, x1, y0, y1, z0, z1)
+        self.scene_clip = None
+
         # Scene correction (rotation + shift for axis alignment)
         self.scene_correction = SceneCorrection()
 
@@ -300,6 +303,20 @@ class BaseGLViewport(QOpenGLWidget):
         if self.show_axes:
             self._draw_axes()
 
+        # Enable scene clip planes (AABB clipping for all layers)
+        clip = self.scene_clip
+        if clip is not None:
+            x0, x1, y0, y1, z0, z1 = clip
+            # 6 clip planes: +X, -X, +Y, -Y, +Z, -Z
+            glClipPlane(GL_CLIP_PLANE0, [ 1,  0,  0, -x0])  # x >= x0
+            glClipPlane(GL_CLIP_PLANE1, [-1,  0,  0,  x1])  # x <= x1
+            glClipPlane(GL_CLIP_PLANE2, [ 0,  1,  0, -y0])  # y >= y0
+            glClipPlane(GL_CLIP_PLANE3, [ 0, -1,  0,  y1])  # y <= y1
+            glClipPlane(GL_CLIP_PLANE4, [ 0,  0,  1, -z0])  # z >= z0
+            glClipPlane(GL_CLIP_PLANE5, [ 0,  0, -1,  z1])  # z <= z1
+            for i in range(6):
+                glEnable(GL_CLIP_PLANE0 + i)
+
         # Render layers: opaque first, then transparent (simple depth sort)
         visible = self.layer_manager.visible_layers()
         opaque = [l for l in visible if l.opacity >= 0.99]
@@ -314,6 +331,11 @@ class BaseGLViewport(QOpenGLWidget):
                 self._draw_wireframe_layer(layer)
             elif layer.layer_type == "panorama" and self._panorama:
                 self._panorama.draw_marker(layer, self._scene_radius)
+
+        # Disable clip planes
+        if clip is not None:
+            for i in range(6):
+                glDisable(GL_CLIP_PLANE0 + i)
 
     def _render_scene_from_station(self, pano_layer):
         """Render the scene from a panorama station's viewpoint.

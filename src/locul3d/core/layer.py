@@ -255,6 +255,68 @@ class LayerManager:
     def __init__(self):
         self.layers: list[LayerData] = []
         self.base_dir: str = ""
+        self._scene_aabb = None   # cached (x0, x1, y0, y1, z0, z1) or None
+        self._ceiling_z = None    # cached ceiling height or None
+        self._ceiling_computed = False  # True once detection has run
+
+    @property
+    def scene_aabb(self):
+        """Cached scene AABB across all geometry layers (excludes panoramas).
+
+        Computed once on first access; call invalidate_scene_aabb() when
+        layers are added or removed.
+        """
+        if self._scene_aabb is None:
+            self._scene_aabb = self._compute_scene_aabb()
+        return self._scene_aabb
+
+    @property
+    def ceiling_z(self):
+        """Cached ceiling height, or None if not detected / not yet computed."""
+        return self._ceiling_z
+
+    def compute_ceiling_background(self):
+        """Compute ceiling height silently. Call after all geometry is loaded.
+
+        Result is cached in ceiling_z — not applied until user asks.
+        """
+        if self._ceiling_computed:
+            return
+        self._ceiling_computed = True
+        from ..analysis.ceiling import CeilingDetector
+        det = CeilingDetector()
+        geom_layers = [l for l in self.layers if l.layer_type != "panorama"]
+        self._ceiling_z = det.detect(geom_layers, max_samples=500_000)
+
+    def invalidate_scene_aabb(self):
+        """Force re-computation of scene AABB and ceiling on next access."""
+        self._scene_aabb = None
+        self._ceiling_z = None
+        self._ceiling_computed = False
+
+    def _compute_scene_aabb(self):
+        """Compute union AABB from all geometry layers (panoramas excluded)."""
+        global_min = None
+        global_max = None
+        for layer in self.layers:
+            if layer.layer_type == "panorama":
+                continue
+            if layer.points is not None and len(layer.points) > 0:
+                lmin = layer.points.min(axis=0)
+                lmax = layer.points.max(axis=0)
+                if global_min is None:
+                    global_min = lmin.copy()
+                    global_max = lmax.copy()
+                else:
+                    np.minimum(global_min, lmin, out=global_min)
+                    np.maximum(global_max, lmax, out=global_max)
+        if global_min is None:
+            return None
+        return (
+            float(global_min[0]), float(global_max[0]),
+            float(global_min[1]), float(global_max[1]),
+            float(global_min[2]), float(global_max[2]),
+        )
 
     def load_single_file(self, path: str):
         """Load a single PLY/OBJ file as one layer (appends to existing layers)."""
@@ -295,6 +357,7 @@ class LayerManager:
         if layer.colors is not None and len(layer.colors) > 0:
             layer.color = None
         self.layers.append(layer)
+        self.invalidate_scene_aabb()
 
     def get_scene_bounds(self):
         """Compute union bounding sphere across all loaded layers."""

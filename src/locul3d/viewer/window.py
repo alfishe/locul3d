@@ -20,6 +20,7 @@ from ..ui.themes import ThemeManager
 from ..ui.widgets.layers import LayerPanel
 from ..ui.widgets.info import InfoPanel
 from ..ui.dialogs.correction_dialog import CorrectionDialog
+from ..ui.dialogs.scene_dialog import SceneDialog
 
 
 class ViewerWindow(QMainWindow):
@@ -159,6 +160,11 @@ class ViewerWindow(QMainWindow):
         act_screenshot.triggered.connect(self._on_screenshot)
         toolbar.addAction(act_screenshot)
 
+        act_scene = QAction("Scene", self)
+        act_scene.setToolTip("Scene bounds, ceiling clipping, dimensions")
+        act_scene.triggered.connect(self._on_scene)
+        toolbar.addAction(act_scene)
+
         act_correction = QAction("Scene Correction", self)
         act_correction.setToolTip("Adjust scene rotation and shift for axis alignment")
         act_correction.triggered.connect(self._on_scene_correction)
@@ -212,6 +218,8 @@ class ViewerWindow(QMainWindow):
                 else:
                     self._load_file(str(p), fit_camera=False)
         self.viewport.fit_to_scene()
+        # Compute ceiling height silently in background (cached, not applied)
+        QTimer.singleShot(0, self.layer_manager.compute_ceiling_background)
         # Auto-detect sidecar correction YAML
         if files:
             self._try_load_sidecar(files[0])
@@ -394,6 +402,20 @@ class ViewerWindow(QMainWindow):
             pixmap = self.viewport.grab()
             pixmap.save(path)
             self.status_label.setText(f"Screenshot saved: {Path(path).name}")
+
+    def _on_scene(self):
+        """Open the non-modal Scene dialog for bounds & ceiling clipping."""
+        dlg = SceneDialog(self.layer_manager, self.viewport, self)
+        dlg.clip_changed.connect(self._apply_scene_clip)
+        dlg.show()  # non-modal
+        self._scene_dialog = dlg  # prevent GC
+
+    def _apply_scene_clip(self, x0, x1, y0, y1, z0, z1):
+        """Apply scene clip bounds from the Scene dialog."""
+        self.viewport.scene_clip = (x0, x1, y0, y1, z0, z1)
+        self.viewport.update()
+        self.status_label.setText(
+            f"Scene clip: X=[{x0:.1f},{x1:.1f}] Y=[{y0:.1f},{y1:.1f}] Z=[{z0:.1f},{z1:.1f}]")
 
     def _on_scene_correction(self):
         """Open the Scene Correction dialog for live rotation/shift adjustment."""
