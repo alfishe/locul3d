@@ -1,4 +1,0 @@
-[console_scripts]
-locul3d = locul3d.__main__:main
-locul3d-editor = locul3d.editor.main:main
-locul3d-viewer = locul3d.viewer.main:main
