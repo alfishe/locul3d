@@ -84,12 +84,48 @@ def ray_aabb_intersect(origin, direction, bb_min, bb_max):
 
 
 def project_to_screen(world_point, modelview, projection, viewport):
-    """Project 3D world point to 2D screen coordinates (Qt convention)."""
-    try:
-        from OpenGL.GLU import gluProject
-    except ImportError:
-        return 0, 0
-    
-    sx, sy, sz = gluProject(float(world_point[0]), float(world_point[1]),
-                            float(world_point[2]), modelview, projection, viewport)
-    return sx, viewport[3] - sy
+    """Project 3D world point to 2D screen coordinates (Qt convention).
+
+    Pure NumPy implementation — no GL context needed.
+    """
+    p = np.array([world_point[0], world_point[1], world_point[2], 1.0],
+                 dtype=np.float64)
+    # modelview and projection are column-major (OpenGL convention)
+    eye = modelview.T @ p
+    clip = projection.T @ eye
+    if abs(clip[3]) < 1e-12:
+        return 0.0, 0.0
+    ndc = clip[:3] / clip[3]
+    sx = viewport[0] + (ndc[0] + 1.0) * viewport[2] * 0.5
+    sy = viewport[1] + (ndc[1] + 1.0) * viewport[3] * 0.5
+    return float(sx), float(viewport[3] - sy)
+
+
+def project_points_to_screen(points, modelview, projection, viewport):
+    """Batch-project N×3 world points to N×2 screen coords (Qt convention).
+
+    Args:
+        points:     (N, 3) array of world coordinates.
+        modelview:  4×4 GL modelview matrix (column-major).
+        projection: 4×4 GL projection matrix (column-major).
+        viewport:   (x, y, w, h) GL viewport.
+
+    Returns:
+        (N, 2) array of screen coordinates.
+    """
+    n = len(points)
+    if n == 0:
+        return np.empty((0, 2), dtype=np.float64)
+    pts = np.ones((n, 4), dtype=np.float64)
+    pts[:, :3] = points
+    # Transform: world → eye → clip (column-major: transpose for @ with row vectors)
+    mvp = (projection.T @ modelview.T).T  # combined MVP for column-vector multiply
+    clip = pts @ mvp
+    w = clip[:, 3:4]
+    w[np.abs(w) < 1e-12] = 1e-12  # avoid div-by-zero
+    ndc = clip[:, :3] / w
+    screen = np.empty((n, 2), dtype=np.float64)
+    screen[:, 0] = viewport[0] + (ndc[:, 0] + 1.0) * viewport[2] * 0.5
+    screen[:, 1] = viewport[3] - (viewport[1] + (ndc[:, 1] + 1.0) * viewport[3] * 0.5)
+    return screen
+

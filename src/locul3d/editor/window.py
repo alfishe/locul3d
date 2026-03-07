@@ -149,6 +149,7 @@ class EditorWindow(QMainWindow):
         self.bbox_panel.create_requested.connect(self._create_bbox_at_target)
         self.bbox_panel.tool_changed.connect(self._set_tool)
         self.bbox_panel.axis_changed.connect(self._set_axis)
+        self.bbox_panel.pos_mode_changed.connect(self._on_pos_mode_changed)
 
         self.plane_panel.plane_changed.connect(self._on_plane_changed)
         self.plane_panel.delete_requested.connect(self._delete_plane)
@@ -372,6 +373,14 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Tool mode
     # ------------------------------------------------------------------
+
+    def _on_pos_mode_changed(self, mode: str):
+        """Sync viewport scale behaviour with BBox panel position mode.
+
+        In 'corners' mode, scale handles anchor the opposite face.
+        In 'center' mode, scaling is symmetric around center.
+        """
+        self.gl_viewport.scale_from_corner = (mode == "corners")
 
     def _set_tool(self, tool):
         """Switch the active gizmo tool (select/move/rotate/scale).

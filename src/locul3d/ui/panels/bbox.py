@@ -29,6 +29,7 @@ class BBoxPanel(QWidget):
     create_requested = Signal()
     tool_changed = Signal(str)
     axis_changed = Signal(object)  # int index or None
+    pos_mode_changed = Signal(str)  # "center" or "corners"
 
     def __init__(self, annotations, parent=None):
         super().__init__(parent)
@@ -131,10 +132,20 @@ class BBoxPanel(QWidget):
         color_row.addStretch()
         prop.addLayout(color_row, row, 1, 1, 5)
 
-        # Position: X Y Z
+        # Position: X Y Z  (with Center/Corners toggle)
         row += 1
-        prop.addWidget(self._bold_label("Position"), row, 0, 1, 6)
+        pos_header = QHBoxLayout()
+        pos_header.addWidget(self._bold_label("Position"))
+        pos_header.addStretch()
+        self._pos_mode = "center"   # "center" or "corners"
+        self._pos_mode_btn = QPushButton("Center")
+        self._pos_mode_btn.setFixedWidth(70)
+        self._pos_mode_btn.setToolTip("Toggle between Center+Size and Min/Max corners")
+        self._pos_mode_btn.clicked.connect(self._toggle_pos_mode)
+        pos_header.addWidget(self._pos_mode_btn)
+        prop.addLayout(pos_header, row, 0, 1, 6)
         self.pos_spins = {}
+        self._center_widgets = []  # labels + spinners to show/hide
         for i, axis in enumerate(["X", "Y", "Z"]):
             row += 1
             lbl = QLabel(f"  {axis}:")
@@ -147,11 +158,59 @@ class BBoxPanel(QWidget):
             sp.valueChanged.connect(self._on_pos_changed)
             prop.addWidget(sp, row, 1, 1, 5)
             self.pos_spins[i] = sp
+            self._center_widgets.extend([lbl, sp])
 
-        # Size: X Y Z
+        # Corner Min/Max spinners (hidden by default, shown in "corners" mode)
+        self._corner_min_label = self._bold_label("Min Corner")
         row += 1
-        prop.addWidget(self._bold_label("Size"), row, 0, 1, 6)
+        prop.addWidget(self._corner_min_label, row, 0, 1, 6)
+        self.corner_min_spins = {}
+        for i, axis in enumerate(["X", "Y", "Z"]):
+            row += 1
+            lbl = QLabel(f"  {axis}:")
+            lbl.setStyleSheet(f"color: {_axis_qcolor(i)};")
+            prop.addWidget(lbl, row, 0)
+            sp = QDoubleSpinBox()
+            sp.setRange(-10000, 10000)
+            sp.setDecimals(3)
+            sp.setSingleStep(0.05)
+            sp.valueChanged.connect(self._on_corner_changed)
+            prop.addWidget(sp, row, 1, 1, 5)
+            self.corner_min_spins[i] = sp
+            self._corner_min_widgets = self._corner_min_widgets if hasattr(self, '_corner_min_widgets') else []
+            self._corner_min_widgets.extend([lbl, sp])
+
+        self._corner_max_label = self._bold_label("Max Corner")
+        row += 1
+        prop.addWidget(self._corner_max_label, row, 0, 1, 6)
+        self.corner_max_spins = {}
+        for i, axis in enumerate(["X", "Y", "Z"]):
+            row += 1
+            lbl = QLabel(f"  {axis}:")
+            lbl.setStyleSheet(f"color: {_axis_qcolor(i)};")
+            prop.addWidget(lbl, row, 0)
+            sp = QDoubleSpinBox()
+            sp.setRange(-10000, 10000)
+            sp.setDecimals(3)
+            sp.setSingleStep(0.05)
+            sp.valueChanged.connect(self._on_corner_changed)
+            prop.addWidget(sp, row, 1, 1, 5)
+            self.corner_max_spins[i] = sp
+            self._corner_max_widgets = self._corner_max_widgets if hasattr(self, '_corner_max_widgets') else []
+            self._corner_max_widgets.extend([lbl, sp])
+
+        # Collect all corner widgets for show/hide
+        self._corner_widgets = ([self._corner_min_label] +
+                                self._corner_min_widgets +
+                                [self._corner_max_label] +
+                                self._corner_max_widgets)
+
+        # Size: X Y Z (hidden in corners mode — redundant with min/max)
+        row += 1
+        self._size_label = self._bold_label("Size")
+        prop.addWidget(self._size_label, row, 0, 1, 6)
         self.size_spins = {}
+        self._size_widgets = [self._size_label]
         for i, axis in enumerate(["X", "Y", "Z"]):
             row += 1
             lbl = QLabel(f"  {axis}:")
@@ -164,6 +223,7 @@ class BBoxPanel(QWidget):
             sp.valueChanged.connect(self._on_size_changed)
             prop.addWidget(sp, row, 1, 1, 5)
             self.size_spins[i] = sp
+            self._size_widgets.extend([lbl, sp])
 
         # Rotation Z
         row += 1
@@ -194,11 +254,78 @@ class BBoxPanel(QWidget):
         layout.addStretch()
         self.prop_frame.setEnabled(False)
 
+        # Initially show center mode, hide corners
+        self._apply_pos_mode()
+
     @staticmethod
     def _bold_label(text):
         lbl = QLabel(text)
         lbl.setStyleSheet("font-weight: bold; padding-top: 4px;")
         return lbl
+
+    # --- Position mode: Center vs Corners ---
+
+    def _toggle_pos_mode(self):
+        """Toggle between Center+Size and Min/Max corners editing modes."""
+        if self._pos_mode == "center":
+            self._pos_mode = "corners"
+        else:
+            self._pos_mode = "center"
+        self._apply_pos_mode()
+        self.pos_mode_changed.emit(self._pos_mode)
+        # Refresh values in the new mode
+        idx = self.list_widget.currentRow()
+        if 0 <= idx < len(self.annotations):
+            self._populate_props(idx)
+
+    def _apply_pos_mode(self):
+        """Show/hide widgets based on current position mode."""
+        is_center = (self._pos_mode == "center")
+        self._pos_mode_btn.setText("Center" if is_center else "Corners")
+
+        # Center mode: show center XYZ + size XYZ, hide corner min/max
+        for w in self._center_widgets:
+            w.setVisible(is_center)
+        for w in self._size_widgets:
+            w.setVisible(is_center)
+        for w in self._corner_widgets:
+            w.setVisible(not is_center)
+
+    def _on_corner_changed(self):
+        """Handle corner min/max spinner edits — recompute center and size."""
+        if self._updating:
+            return
+        idx = self.list_widget.currentRow()
+        if idx < 0 or idx >= len(self.annotations):
+            return
+        bbox = self.annotations[idx]
+
+        display_min = np.array([self.corner_min_spins[i].value() for i in range(3)],
+                               dtype=np.float64)
+        display_max = np.array([self.corner_max_spins[i].value() for i in range(3)],
+                               dtype=np.float64)
+
+        # Convert from display to world coords if needed
+        if self._display_to_world is not None:
+            world_min = self._display_to_world(display_min)
+            world_max = self._display_to_world(display_max)
+        else:
+            world_min = display_min
+            world_max = display_max
+
+        # Ensure min <= max per axis
+        for i in range(3):
+            if world_min[i] > world_max[i]:
+                world_min[i], world_max[i] = world_max[i], world_min[i]
+
+        bbox.center_pos[:] = (world_min + world_max) / 2.0
+        bbox.size[:] = world_max - world_min
+        # Clamp size minimum
+        for i in range(3):
+            if bbox.size[i] < 0.01:
+                bbox.size[i] = 0.01
+
+        self.bbox_changed.emit(idx)
 
     # --- Tool / axis ---
 
@@ -261,6 +388,7 @@ class BBoxPanel(QWidget):
             self._populate_props(idx)
 
     def _populate_props(self, idx):
+        """Populate all property spinners from the bbox at the given index."""
         if idx < 0 or idx >= len(self.annotations):
             self.prop_frame.setEnabled(False)
             return
@@ -274,6 +402,17 @@ class BBoxPanel(QWidget):
         for i in range(3):
             self.pos_spins[i].setValue(display_pos[i])
             self.size_spins[i].setValue(bbox.size[i])
+
+        # Populate corner spinners
+        bb_min = bbox.bb_min
+        bb_max = bbox.bb_max
+        if self._world_to_display is not None:
+            bb_min = self._world_to_display(bb_min)
+            bb_max = self._world_to_display(bb_max)
+        for i in range(3):
+            self.corner_min_spins[i].setValue(bb_min[i])
+            self.corner_max_spins[i].setValue(bb_max[i])
+
         self.rot_z_spin.setValue(bbox.rotation_z)
         self._updating = False
 

@@ -126,7 +126,7 @@ TOOL_SCALE  = "scale"
 # ============================================================================
 
 # Gizmo hit-test threshold in pixels
-GIZMO_HIT_PX = 15
+GIZMO_HIT_PX = 20
 
 # Axis colors for gizmo
 AXIS_COLORS = {

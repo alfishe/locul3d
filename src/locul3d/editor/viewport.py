@@ -12,7 +12,7 @@ from ..core.constants import AXIS_COLORS, AABB_EDGES, GIZMO_HIT_PX
 from ..core.geometry import BBoxItem, PlaneItem
 from ..core.layer import LayerManager
 from ..rendering.gl.viewport import BaseGLViewport
-from ..utils.math import project_to_screen, ray_from_mouse, ray_aabb_intersect
+from ..utils.math import project_to_screen, project_points_to_screen, ray_from_mouse, ray_aabb_intersect
 
 try:
     from OpenGL.GL import *
@@ -68,6 +68,9 @@ class EditorViewport(BaseGLViewport):
 
         self.setMouseTracking(True)  # needed for hover detection
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        # When True, scale handles move only one face (opposite corner is anchored)
+        self.scale_from_corner = False
 
     # ------------------------------------------------------------------
     # Rendering Overrides
@@ -341,6 +344,14 @@ class EditorViewport(BaseGLViewport):
 
     def _hit_test_gizmo(self, screen_x, screen_y):
         """Test screen-space proximity to gizmo handles.
+
+        All test points are batch-projected in a single NumPy call for
+        performance (no per-point GL calls).
+
+        Priority: scale handles > move arrows > rotation ring.
+        Scale handles cannot be overridden by move arrows unless the arrow
+        is significantly closer (>5px margin).
+
         Returns (operation, axis, sign) or None.
         """
         if self.selected_idx < 0 or self.selected_idx >= len(self.annotations):
@@ -352,45 +363,94 @@ class EditorViewport(BaseGLViewport):
         c = bbox.center_pos
         gizmo_len = self._gizmo_len(bbox)
         thr = GIZMO_HIT_PX
-        best_dist, best_hit = thr + 1, None
 
-        # Scale handles — 6 face centers
+        # --- Build all test points and their metadata ---
+        points = []    # 3D world positions
+        meta = []      # (operation, axis, sign) for each point
+
+        # Scale handles: 6 face centers
         for axis in range(3):
             for sign in (+1, -1):
-                handle = c.copy()
-                handle[axis] += sign * bbox.size[axis] / 2.0
-                sx, sy = self._project_to_screen_local(handle)
-                d = math.hypot(screen_x - sx, screen_y - sy)
-                if d < best_dist:
-                    best_dist, best_hit = d, ('scale', axis, sign)
+                pt = c.copy()
+                pt[axis] += sign * bbox.size[axis] / 2.0
+                points.append(pt)
+                meta.append(('scale', axis, sign))
 
-        # Move arrow tips
+        # Move arrows: 5 samples along each axis shaft
         for axis in range(3):
-            tip = c.copy()
-            tip[axis] += gizmo_len
-            sx, sy = self._project_to_screen_local(tip)
-            d = math.hypot(screen_x - sx, screen_y - sy)
-            if d < best_dist:
-                best_dist, best_hit = d, ('move', axis, 0)
+            for frac in (0.2, 0.4, 0.6, 0.8, 1.0):
+                pt = c.copy()
+                pt[axis] += gizmo_len * frac
+                points.append(pt)
+                meta.append(('move', axis, 0))
 
-        # Rotation ring — sample 24 points
+        # Rotation ring: 24 samples
         radius = max(bbox.size[0], bbox.size[1]) * 0.6
         if radius > 0.05:
             for seg in range(24):
                 angle = 2.0 * math.pi * seg / 24
-                ring_pt = np.array([
+                points.append(np.array([
                     c[0] + radius * math.cos(angle),
                     c[1] + radius * math.sin(angle),
                     c[2],
-                ])
-                sx, sy = self._project_to_screen_local(ring_pt)
-                d = math.hypot(screen_x - sx, screen_y - sy)
-                if d < best_dist:
-                    best_dist, best_hit = d, ('rotate', 2, 0)
+                ]))
+                meta.append(('rotate', 2, 0))
 
-        if best_dist <= thr:
-            return best_hit
-        return None
+        if not points:
+            return None
+
+        # --- Batch project all points to screen ---
+        pts_array = np.array(points, dtype=np.float64)
+        screen_pts = project_points_to_screen(
+            pts_array, self._gl_modelview, self._gl_projection, self._gl_viewport)
+
+        # --- Compute distances ---
+        dists = np.hypot(screen_pts[:, 0] - screen_x,
+                         screen_pts[:, 1] - screen_y)
+
+        # --- Find best per category ---
+        n_scale = 6
+        n_move = 15
+        scale_dists = dists[:n_scale]
+        move_dists = dists[n_scale:n_scale + n_move]
+        rot_dists = dists[n_scale + n_move:]
+
+        scale_dist, scale_hit = thr + 1, None
+        if len(scale_dists):
+            idx = int(np.argmin(scale_dists))
+            if scale_dists[idx] <= thr:
+                scale_dist = float(scale_dists[idx])
+                scale_hit = meta[idx]
+
+        move_dist, move_hit = thr + 1, None
+        if len(move_dists):
+            idx = int(np.argmin(move_dists))
+            if move_dists[idx] <= thr:
+                move_dist = float(move_dists[idx])
+                move_hit = meta[n_scale + idx]
+
+        rot_dist, rot_hit = thr + 1, None
+        if len(rot_dists):
+            idx = int(np.argmin(rot_dists))
+            if rot_dists[idx] <= thr:
+                rot_dist = float(rot_dists[idx])
+                rot_hit = meta[n_scale + n_move + idx]
+
+        # --- Resolve with priority ---
+        best_dist, best_hit = thr + 1, None
+
+        if scale_dist <= thr:
+            best_dist, best_hit = scale_dist, scale_hit
+
+        if move_dist <= thr:
+            margin = 5.0 if best_hit is not None else 0.0
+            if move_dist < best_dist - margin:
+                best_dist, best_hit = move_dist, move_hit
+
+        if rot_dist <= thr and rot_dist < best_dist:
+            best_dist, best_hit = rot_dist, rot_hit
+
+        return best_hit
 
     def _find_nearest_bbox(self, origin, direction):
         """Ray-cast against all bboxes, return nearest index or -1."""
@@ -564,6 +624,14 @@ class EditorViewport(BaseGLViewport):
                 world_delta = px_along / axis_len_screen
                 new_size = self._drag_orig_size.copy()
                 new_size[axis] = max(0.02, self._drag_orig_size[axis] + world_delta * self._drag_sign)
+
+                if self.scale_from_corner:
+                    # Corner mode: anchor the opposite face, shift center
+                    size_change = new_size[axis] - self._drag_orig_size[axis]
+                    new_center = self._drag_orig_center.copy()
+                    new_center[axis] += size_change * self._drag_sign * 0.5
+                    self.annotations[self.selected_idx].center_pos = new_center
+
                 self.annotations[self.selected_idx].size = new_size
                 self.bbox_moved.emit(self.selected_idx)
                 self.update()
