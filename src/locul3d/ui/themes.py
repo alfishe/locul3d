@@ -52,10 +52,12 @@ class ThemeManager:
         C = COLORS
         return f"""
             QMainWindow {{ background: {C['bg']}; }}
-            QToolBar {{ background: {C['card']}; border: none; padding: 4px; spacing: 4px; }}
-            QToolBar QToolButton {{ color: {C['text']}; padding: 6px 10px; border-radius: 4px; }}
-            QToolBar QToolButton:hover {{ background: {C['border']}; }}
-            QToolBar QToolButton:checked {{ background: {C['hover']}; }}
+            QToolBar {{ background: {C['card']}; border: none; border-bottom: 1px solid {C['border']}; padding: 4px; spacing: 4px; }}
+            QToolBar QToolButton {{ color: {C['text']}; background: {C['button_bg']};
+                padding: 5px 10px; border-radius: 4px; border: 1px solid {C['button_border']}; }}
+            QToolBar QToolButton:hover {{ background: {C['hover']}; border-color: {C['accent']}; }}
+            QToolBar QToolButton:checked {{ background: {C['accent']}; color: #ffffff; border-color: {C['accent']}; }}
+            QToolBar::separator {{ background: {C['border']}; width: 1px; margin: 4px 6px; }}
             QStatusBar {{ background: {C['input_bg']}; color: {C['text_muted']}; font-size: 12px; }}
             QDockWidget {{ color: {C['text']}; font-size: 12px; }}
             QDockWidget::title {{ background: {C['card']}; padding: 6px; }}

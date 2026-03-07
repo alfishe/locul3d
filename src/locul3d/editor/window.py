@@ -43,9 +43,40 @@ except ImportError:
 
 
 class EditorWindow(QMainWindow):
-    """BBox Annotation Editor — full-featured main window."""
+    """Locul3D Editor — annotation editor for 3D point cloud scenes.
+
+    Extends the viewer with BBox annotation, surface plane, reference point,
+    and scene correction tools.  Supports undo, YAML/JSON save/load, and
+    Blender-like keyboard shortcuts.
+
+    Architecture:
+        - gl_viewport:    EditorViewport — OpenGL widget with picking/gizmo
+        - layer_manager:  LayerManager   — owns all loaded LayerData
+        - layer_panel:    LayerPanel     — sidebar for visibility/opacity
+        - bbox_panel:     BBoxPanel      — annotation list and property editing
+        - plane_panel:    PlanePanel     — surface plane list and editing
+        - ref_panel:      ReferencePanel — reference point and coord mode
+        - info_panel:     InfoPanel      — metadata display for selected layer
+        - theme:          ThemeManager   — dark/light stylesheet generation
+
+    Lifecycle:
+        1. __init__ creates UI, wires signals, optionally defers file loading
+        2. _deferred_load runs after event loop starts (100ms delay)
+        3. _post_load triggers background AABB/ceiling caching after any load
+        4. File-watch timer polls every 2s for on-disk changes (hot reload)
+    """
 
     def __init__(self, files=None, annotations_path=None, correction_angles=None, parent=None):
+        """Initialise the Editor window.
+
+        Args:
+            files:             List of file/folder paths to load on startup.
+                               Loading is deferred 100ms to let the event loop start.
+            annotations_path:  Optional path to a YAML/JSON annotation file to load.
+            correction_angles: Dict with rotate_x/y/z and shift_x/y/z overrides
+                               (applied to gl_viewport.scene_correction on startup).
+            parent:            Optional parent QWidget.
+        """
         super().__init__(parent)
         self.setWindowTitle("Locul3D — Editor")
         self.resize(1500, 900)
@@ -144,6 +175,7 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _setup_ui(self):
+        """Create the central widget layout with the GL viewport filling it."""
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -151,6 +183,16 @@ class EditorWindow(QMainWindow):
         self.setCentralWidget(central)
 
     def _setup_toolbar(self):
+        """Build the main toolbar with file, view, annotation, and tool actions.
+
+        Toolbar items (left to right):
+          File:   Open File, Open Folder
+          YAML:   Save, Save As, Load
+          View:   Layer Colors (checkable), Axes, Grid
+          Size:   Point size slider (1–20)
+          Camera: Preset dropdown, Fit All, Reset View
+          Tools:  Ref/Coords, Ground Z=0, Scene, Scene Correction
+        """
         toolbar = QToolBar("Main Toolbar")
         toolbar.setIconSize(QSize(20, 20))
         toolbar.setMovable(False)
@@ -255,6 +297,11 @@ class EditorWindow(QMainWindow):
         toolbar.addAction(act_correction)
 
     def _setup_sidebar(self):
+        """Create dock widgets: Layers, BBox, Planes, Info, Reference.
+
+        Right-side docks are tabified (Layers → BBox → Planes → Info).
+        Reference dock is floating and hidden by default.
+        """
         # Layers dock
         self._layers_dock = QDockWidget("Layers", self)
         self._layers_dock.setAllowedAreas(
@@ -312,6 +359,7 @@ class EditorWindow(QMainWindow):
         self._layers_dock.raise_()
 
     def _setup_statusbar(self):
+        """Create status bar with tool/axis info, camera readout, and FPS."""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_label = QLabel("Ready — Ctrl+Click to place bbox")
@@ -326,18 +374,28 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _set_tool(self, tool):
+        """Switch the active gizmo tool (select/move/rotate/scale).
+
+        Updates the viewport, the BBox panel button states, and the status bar.
+        """
         self.gl_viewport.tool = tool
         self.bbox_panel.set_tool(tool)
         self._update_status()
         self.gl_viewport.update()
 
     def _set_axis(self, axis):
+        """Set or clear the axis constraint for move/rotate/scale gizmos.
+
+        Args:
+            axis: 0=X, 1=Y, 2=Z, or None for unconstrained.
+        """
         self.gl_viewport.axis_constraint = axis
         self.bbox_panel.set_axis(axis)
         self._update_status()
         self.gl_viewport.update()
 
     def _update_status(self):
+        """Refresh the status bar text with current tool and axis info."""
         tool = self.gl_viewport.tool
         axis = self.gl_viewport.axis_constraint
         parts = [f"Tool: {tool.capitalize()}"]
@@ -349,6 +407,11 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
     # File loading
     # ------------------------------------------------------------------
+
+    def _post_load(self):
+        """Called after any geometry load — refresh caches in background."""
+        self.layer_manager.invalidate_scene_aabb()
+        QTimer.singleShot(0, self.layer_manager.compute_ceiling_background)
 
     def _deferred_load(self):
         """Load files passed via constructor after the event loop starts."""
@@ -364,13 +427,17 @@ class EditorWindow(QMainWindow):
                 else:
                     self._load_file(str(p), fit_camera=False)
         self.gl_viewport.fit_to_scene()
-        # Compute ceiling height silently in background (cached, not applied)
-        QTimer.singleShot(0, self.layer_manager.compute_ceiling_background)
+        self._post_load()
         if yaml_path and Path(yaml_path).exists():
             self._load_yaml(yaml_path)
         self._update_status()
 
     def _on_open_file(self):
+        """Show file dialog to open one or more 3D files.
+
+        E57 files are routed through the full import pipeline with progress.
+        Auto-detects correction sidecar for the first opened file.
+        """
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Open Files", "",
             "3D Files (*.ply *.obj *.stl *.e57);;All Files (*)")
@@ -384,6 +451,7 @@ class EditorWindow(QMainWindow):
             self._try_load_sidecar(paths[0])
 
     def _on_open_folder(self):
+        """Show folder dialog and load all supported files from selected directory."""
         folder = QFileDialog.getExistingDirectory(self, "Open Folder")
         if folder:
             self._load_folder(folder)
@@ -459,8 +527,15 @@ class EditorWindow(QMainWindow):
             total_pts = sum(l.point_count for l in result.layers)
             self.status_label.setText(
                 f"Imported E57: {n_layers} layers, {total_pts:,} points")
+            self._post_load()
 
     def _load_file(self, path: str, fit_camera: bool = True):
+        """Load a single geometry file as a new layer.
+
+        Args:
+            path:       Absolute path to the file.
+            fit_camera: If True, auto-fit camera after loading.
+        """
         self.status_label.setText(f"Loading {Path(path).name}...")
         QApplication.processEvents()
         try:
@@ -475,10 +550,15 @@ class EditorWindow(QMainWindow):
         if last:
             self.info_panel.show_layer_info(last)
         self.status_label.setText(f"Loaded {Path(path).name}")
+        self._post_load()
         # Auto-detect correction sidecar
         self._try_load_sidecar(path)
 
     def _load_folder(self, folder: str):
+        """Load all .ply files from a folder, applying layers.json manifest if present.
+
+        Camera is fitted once after all files load.
+        """
         folder_path = Path(folder)
         ply_files = sorted(folder_path.glob("*.ply"))
         for p in ply_files:
@@ -504,6 +584,7 @@ class EditorWindow(QMainWindow):
             except Exception:
                 pass
         self.gl_viewport.fit_to_scene()
+        self._post_load()
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
 
     # ------------------------------------------------------------------
@@ -511,6 +592,11 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _create_bbox_at_position(self, x, y, z):
+        """Create a new BBox annotation at the given world coordinates.
+
+        Uses the current label from bbox_panel's combo box and default size.
+        Bottom-center is placed at the picked point. Auto-selects the new bbox.
+        """
         label = self.bbox_panel.label_combo.currentText() or "mts_column"
         size = DEFAULT_SIZES.get(label, DEFAULT_SIZES["custom"]).copy()
         # Place bottom-center at picked point
@@ -528,10 +614,12 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(f"Created [{idx}] {label} at ({x:.2f}, {y:.2f}, {z:.2f})")
 
     def _create_bbox_at_target(self):
+        """Create a new BBox at the camera target point (keyboard shortcut N)."""
         t = self.gl_viewport.cam_target
         self._create_bbox_at_position(float(t[0]), float(t[1]), float(t[2]))
 
     def _delete_bbox(self, idx):
+        """Delete a BBox annotation by index, pushing the action to the undo stack."""
         if idx < 0 or idx >= len(self.annotations):
             return
         self._push_undo('delete', {
@@ -544,6 +632,10 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(f"Deleted bbox [{idx}]")
 
     def _undo(self):
+        """Pop and reverse the last action from the undo stack.
+
+        Supports undo for create, delete, and transform operations.
+        """
         action = self._pop_undo()
         if action is None:
             return
@@ -568,9 +660,11 @@ class EditorWindow(QMainWindow):
         self.status_label.setText("Undo")
 
     def _push_undo(self, action_type, data):
+        """Push an action onto the undo stack for later reversal."""
         self._undo_stack.append((action_type, data))
 
     def _pop_undo(self):
+        """Pop and return the most recent undo action, or None if stack is empty."""
         if not self._undo_stack:
             return None
         return self._undo_stack.pop()
@@ -589,6 +683,11 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _create_plane(self):
+        """Create a new surface plane at the camera target, corrected to Z=0.
+
+        Color is auto-cycled from PLANE_COLORS palette.
+        Raises the Planes dock tab.
+        """
         t = self.gl_viewport.cam_target
         color = list(PLANE_COLORS[self._plane_color_idx % len(PLANE_COLORS)])
         self._plane_color_idx += 1
@@ -607,6 +706,7 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(f"Created plane [{idx}] at target")
 
     def _delete_plane(self, idx):
+        """Delete a surface plane by index."""
         if idx < 0 or idx >= len(self.planes):
             return
         self.planes.pop(idx)
@@ -616,6 +716,7 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(f"Deleted plane [{idx}]")
 
     def _on_plane_changed(self, idx):
+        """Redraw viewport when a plane's properties are edited in the panel."""
         self.gl_viewport.update()
 
     # ------------------------------------------------------------------
@@ -623,10 +724,12 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_set_ref_point(self):
+        """Enter reference point picking mode — next point-cloud click sets the origin."""
         self.gl_viewport._picking_ref_point = True
         self.status_label.setText("Click on point cloud to set reference origin...")
 
     def _on_clear_ref_point(self):
+        """Clear the reference point and revert to scene coordinates."""
         self._ref_point = None
         self.gl_viewport.ref_point = None
         self.ref_panel.clear_ref_point()
@@ -635,6 +738,7 @@ class EditorWindow(QMainWindow):
         self.status_label.setText("Reference point cleared")
 
     def _on_ref_point_picked(self, x, y, z):
+        """Handle a ref-point pick — store the point, update panel and viewport."""
         self._ref_point = np.array([x, y, z], dtype=np.float64)
         self.gl_viewport.ref_point = self._ref_point
         self.ref_panel.set_ref_point(x, y, z)
@@ -643,10 +747,12 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(f"Reference point set to ({x:.2f}, {y:.2f}, {z:.2f})")
 
     def _on_coord_mode_changed(self, index):
+        """Switch between scene (absolute) and relative coordinate display."""
         self._coord_mode = "scene" if index == 0 else "relative"
         self._refresh_bbox_panel_coords()
 
     def _refresh_bbox_panel_coords(self):
+        """Refresh the BBox panel's coordinate display after ref-point or mode change."""
         idx = self.gl_viewport.selected_idx
         if idx >= 0 and idx < len(self.annotations):
             self.bbox_panel.update_values(idx)
@@ -668,6 +774,11 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _save_yaml(self, path: str):
+        """Serialise annotations, planes, and reference point to YAML or JSON.
+
+        Format depends on whether PyYAML is installed (HAS_YAML).
+        Updates window title and status bar on success.
+        """
         data = {
             "default_column_size": DEFAULT_SIZES["mts_column"].tolist(),
             "default_box_size": DEFAULT_SIZES["mts_box"].tolist(),
@@ -690,6 +801,11 @@ class EditorWindow(QMainWindow):
         self.setWindowTitle(f"Locul3D Editor — {Path(path).name}")
 
     def _load_yaml(self, path: str):
+        """Load annotations, planes, and reference point from a YAML/JSON file.
+
+        Replaces all existing annotations and planes.
+        Updates window title and status bar.
+        """
         with open(path) as f:
             if path.endswith((".yaml", ".yml")) and HAS_YAML:
                 data = yaml.safe_load(f)
@@ -716,18 +832,21 @@ class EditorWindow(QMainWindow):
         self.setWindowTitle(f"Locul3D Editor — {Path(path).name}")
 
     def _on_save_yaml(self):
+        """Save to the current YAML path, or prompt Save As if no path set."""
         if self._yaml_path:
             self._save_yaml(self._yaml_path)
         else:
             self._on_save_yaml_as()
 
     def _on_save_yaml_as(self):
+        """Prompt for a new file path and save annotations."""
         ext = "YAML (*.yaml *.yml)" if HAS_YAML else "JSON (*.json)"
         path, _ = QFileDialog.getSaveFileName(self, "Save Annotations", "", f"{ext};;All Files (*)")
         if path:
             self._save_yaml(path)
 
     def _on_load_yaml(self):
+        """Prompt for a YAML/JSON file and load annotations from it."""
         ext = "YAML/JSON (*.yaml *.yml *.json)" if HAS_YAML else "JSON (*.json)"
         path, _ = QFileDialog.getOpenFileName(self, "Load Annotations", "", f"{ext};;All Files (*)")
         if path:
@@ -738,6 +857,11 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_point_picked(self, x, y, z):
+        """Handle a point-cloud pick: route to ref-point handler or create bbox.
+
+        If in ref-point picking mode, sets the reference origin.
+        Otherwise creates a new BBox at the picked position.
+        """
         # Route to ref-point handler if in picking mode
         if getattr(self.gl_viewport, '_picking_ref_point', False):
             self.gl_viewport._picking_ref_point = False
@@ -746,16 +870,20 @@ class EditorWindow(QMainWindow):
         self._create_bbox_at_position(x, y, z)
 
     def _on_bbox_selected(self, idx):
+        """Handle bbox selection from viewport click — raise BBox dock."""
         self.bbox_panel.select_bbox(idx)
         self._bbox_dock.raise_()
 
     def _on_bbox_moved(self, idx):
+        """Refresh BBox panel values after a gizmo drag moves a bbox."""
         self.bbox_panel.update_values(idx)
 
     def _on_bbox_panel_changed(self, idx):
+        """Redraw viewport when bbox properties are edited in the panel."""
         self.gl_viewport.update()
 
     def _on_bbox_panel_selection(self, idx):
+        """Sync viewport selection with the BBox panel's list selection."""
         self.gl_viewport.selected_idx = idx
         self.gl_viewport.update()
 
@@ -764,6 +892,7 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_layer_changed(self):
+        """Called when any layer's visibility/properties change — evict VBOs and redraw."""
         for layer in self.layer_manager.layers:
             if not layer.visible:
                 self.gl_viewport.delete_vbos_for_layer(layer.id)
@@ -781,6 +910,7 @@ class EditorWindow(QMainWindow):
             self.gl_viewport.update()  # full-quality redraw on release
 
     def _on_layer_selected(self, layer_data):
+        """Handle layer selection in sidebar — update info panel and raise its dock."""
         self._selected_layer = layer_data
         self.info_panel.show_layer_info(layer_data)
         self._info_dock.raise_()
@@ -842,6 +972,7 @@ class EditorWindow(QMainWindow):
             print(f"Warning: failed to load correction sidecar: {e}")
 
     def _on_toggle_layer_colors(self, checked):
+        """Toggle per-layer color tinting — evicts caches and VBOs for full re-upload."""
         self.gl_viewport.use_layer_colors = checked
         for l in self.layer_manager.layers:
             l.evict_byte_caches()
@@ -849,14 +980,17 @@ class EditorWindow(QMainWindow):
         self.gl_viewport.update()
 
     def _toggle_view(self, attr, checked):
+        """Generic toggle for viewport boolean attributes (show_axes, show_grid, etc.)."""
         setattr(self.gl_viewport, attr, checked)
         self.gl_viewport.update()
 
     def _on_point_size(self, val):
+        """Update GL point size from the toolbar slider (range 1–20)."""
         self.gl_viewport.point_size = val
         self.gl_viewport.update()
 
     def _on_camera_preset(self, name):
+        """Set camera to a named preset (Top/Front/Right/Isometric). Distance unchanged."""
         vp = self.gl_viewport
         presets = {"Top": (0, 89), "Front": (0, 0), "Right": (90, 0), "Isometric": (45, 30)}
         if name in presets:
@@ -879,12 +1013,14 @@ class EditorWindow(QMainWindow):
         vp.update()
 
     def _on_fps_updated(self, fps):
+        """Update status bar with camera azimuth/elevation/distance and FPS."""
         vp = self.gl_viewport
         self.cam_label.setText(
             f"Az:{vp.cam_azimuth%360:.0f} El:{vp.cam_elevation:.0f} D:{vp.cam_distance:.1f}")
         self.fps_label.setText(f"FPS: {fps:.0f}")
 
     def _check_file_changes(self):
+        """Poll loaded files for on-disk changes (hot-reload, every 2s via timer)."""
         any_changed = False
         for layer in self.layer_manager.layers:
             if layer.file_changed_on_disk():
@@ -903,6 +1039,16 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent):
+        """Handle keyboard shortcuts.
+
+        Scene correction:  WASD/QE/Arrows → forwarded to viewport
+        Navigation:        Escape → exit panorama or deselect bbox
+        Annotation:        Delete/Backspace → delete selected bbox
+                           N → create bbox at target
+                           Ctrl+Z → undo, Ctrl+D → duplicate
+        Blender tools:     Q=Select, G=Move, R=Rotate, S=Scale
+        Axis constraints:  X/Y/Z → toggle axis constraint for gizmo
+        """
         key = event.key()
         mods = event.modifiers()
 
