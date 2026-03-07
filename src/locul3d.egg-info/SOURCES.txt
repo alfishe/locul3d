@@ -11,6 +11,7 @@ src/locul3d.egg-info/requires.txt
 src/locul3d.egg-info/top_level.txt
 src/locul3d/core/__init__.py
 src/locul3d/core/constants.py
+src/locul3d/core/correction.py
 src/locul3d/core/geometry.py
 src/locul3d/core/layer.py
 src/locul3d/core/scene.py
@@ -22,6 +23,7 @@ src/locul3d/plugins/__init__.py
 src/locul3d/plugins/base.py
 src/locul3d/plugins/importers/__init__.py
 src/locul3d/plugins/importers/e57.py
+src/locul3d/plugins/importers/loaders.py
 src/locul3d/plugins/importers/obj.py
 src/locul3d/plugins/importers/ply.py
 src/locul3d/plugins/tools/__init__.py
@@ -33,11 +35,20 @@ src/locul3d/rendering/camera.py
 src/locul3d/rendering/gizmos.py
 src/locul3d/rendering/gl/__init__.py
 src/locul3d/rendering/gl/viewport.py
+src/locul3d/rendering/panorama/__init__.py
+src/locul3d/rendering/panorama/camera.py
+src/locul3d/rendering/panorama/extractor.py
+src/locul3d/rendering/panorama/geometry.py
+src/locul3d/rendering/panorama/immersive.py
+src/locul3d/rendering/panorama/station_marker.py
 src/locul3d/ui/__init__.py
 src/locul3d/ui/themes.py
+src/locul3d/ui/dialogs/__init__.py
+src/locul3d/ui/dialogs/correction_dialog.py
 src/locul3d/ui/panels/__init__.py
 src/locul3d/ui/panels/bbox.py
 src/locul3d/ui/panels/plane.py
+src/locul3d/ui/panels/reference.py
 src/locul3d/ui/widgets/__init__.py
 src/locul3d/ui/widgets/color_swatch.py
 src/locul3d/ui/widgets/info.py
