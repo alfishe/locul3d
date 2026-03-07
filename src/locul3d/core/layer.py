@@ -290,6 +290,7 @@ class LayerManager:
         self.base_dir = str(Path(path).parent)
         layer = LayerData(layer_def, self.base_dir)
         load_geometry(path, layer)
+        layer.loaded = True  # Mark as loaded so visible_layers() includes it
         # If file has per-vertex colors, drop the auto layer color
         if layer.colors is not None and len(layer.colors) > 0:
             layer.color = None
