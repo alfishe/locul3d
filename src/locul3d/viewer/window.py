@@ -4,6 +4,12 @@ import sys
 import json
 from pathlib import Path
 
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QToolBar, QStatusBar,
@@ -310,25 +316,11 @@ class ViewerWindow(QMainWindow):
             self._import_e57_file(path)
 
     def _import_e57_file(self, path: str):
-        """Import E57 file through the full processing pipeline."""
-        # --- Correction sidecar detection ---
-        from ..core.correction import SceneCorrection
-        scene_p = Path(path).resolve()
-        print(f"[E57] Searching for correction sidecar in: {scene_p.parent}/")
-        sidecar = SceneCorrection.find_sidecar(str(scene_p))
-        correction = None
-        if sidecar:
-            try:
-                correction = SceneCorrection.load_yaml(sidecar)
-                print(f"[E57] Correction LOADED from: {sidecar}")
-                print(f"[E57]   rot=({correction.rotate_x}, {correction.rotate_y}, {correction.rotate_z})°  "
-                      f"shift=({correction.shift_x}, {correction.shift_y}, {correction.shift_z})")
-            except Exception as e:
-                print(f"[E57] WARNING: failed to load correction sidecar: {e}")
-                correction = None
-        else:
-            print(f"[E57] No correction sidecar found for: {scene_p.name}")
+        """Import E57 file through the full processing pipeline.
 
+        Correction is handled via the unified project YAML (loaded by
+        _try_load_sidecar after import).
+        """
         try:
             from ..plugins.importers.e57 import (
                 E57ImportWorker, E57ProgressDialog, E57Importer,
@@ -352,15 +344,6 @@ class ViewerWindow(QMainWindow):
 
         result = dialog.get_result()
         if result and result.layers:
-            # Bake correction into point data (scene coords → global coords)
-            if correction and not correction.is_identity:
-                import numpy as np
-                for layer in result.layers:
-                    if layer.points is not None and len(layer.points) > 0:
-                        layer.points = correction.bake_points(layer.points).astype(np.float32)
-                    if hasattr(layer, 'pano_position') and layer.pano_position is not None:
-                        pos = correction.transform_point(layer.pano_position)
-                        layer.pano_position = pos.tolist()
 
             for layer in result.layers:
                 self.layer_manager.layers.append(layer)
@@ -514,11 +497,23 @@ class ViewerWindow(QMainWindow):
             f"Scene clip: X=[{x0:.1f},{x1:.1f}] Y=[{y0:.1f},{y1:.1f}] Z=[{z0:.1f},{z1:.1f}]")
 
     def _on_scene_correction(self):
-        """Open the Scene Correction dialog for live rotation/shift adjustment."""
+        """Open or raise the non-modal Scene Correction dialog."""
+        if hasattr(self, '_correction_dlg') and self._correction_dlg is not None:
+            self._correction_dlg.raise_()
+            self._correction_dlg.activateWindow()
+            return
+
         scene_dir = self.layer_manager.base_dir or ""
-        dlg = CorrectionDialog(self.viewport.scene_correction, scene_dir, self)
+        corr = self.viewport.scene_correction or SceneCorrection()
+
+        dlg = CorrectionDialog(
+            corr, scene_dir, parent=self,
+            point_source=self._collect_all_points,
+        )
         dlg.correction_changed.connect(self._apply_correction)
-        dlg.exec()
+        dlg.destroyed.connect(lambda: setattr(self, '_correction_dlg', None))
+        self._correction_dlg = dlg
+        dlg.show()
 
     def _apply_correction(self, c: SceneCorrection):
         """Apply correction values from dialog to viewport (live preview)."""
@@ -531,30 +526,63 @@ class ViewerWindow(QMainWindow):
         else:
             self.status_label.setText("Correction reset")
 
+    def _collect_all_points(self):
+        """Collect all visible point cloud data for auto-detection."""
+        import numpy as np
+        all_pts = []
+        for layer in self.layer_manager.layers:
+            if not layer.visible:
+                continue
+            if hasattr(layer, 'points') and layer.points is not None:
+                all_pts.append(np.asarray(layer.points, dtype=np.float64))
+        if not all_pts:
+            return None
+        return np.vstack(all_pts)
+
     def _try_load_sidecar(self, scene_path: str):
-        """Auto-detect and load a correction YAML sidecar next to a scene file."""
-        p = Path(scene_path).resolve()  # resolve to absolute path
-        sidecar = SceneCorrection.find_sidecar(str(p))
-        if sidecar is None:
-            return
-        try:
-            c = SceneCorrection.load_yaml(sidecar)
-            # CLI args override sidecar values (non-zero CLI wins)
-            cli = self._cli_correction
-            if cli.get('rotate_x', 0): c.rotate_x = cli['rotate_x']
-            if cli.get('rotate_y', 0): c.rotate_y = cli['rotate_y']
-            if cli.get('rotate_z', 0): c.rotate_z = cli['rotate_z']
-            if cli.get('shift_x', 0): c.shift_x = cli['shift_x']
-            if cli.get('shift_y', 0): c.shift_y = cli['shift_y']
-            if cli.get('shift_z', 0): c.shift_z = cli['shift_z']
-            self.viewport.scene_correction = c
-            self.viewport.update()
-            print(f"Scene correction loaded from: {sidecar}")
-            print(f"  rot=({c.rotate_x}, {c.rotate_y}, {c.rotate_z})°  "
-                  f"shift=({c.shift_x}, {c.shift_y}, {c.shift_z})")
-            self.status_label.setText(f"Correction loaded: {Path(sidecar).name}")
-        except Exception as e:
-            print(f"Warning: failed to load correction sidecar: {e}")
+        """Auto-detect and load a unified project file or correction sidecar.
+
+        Search order:
+          1. ``<stem>.yaml`` / ``<stem>.yml``   — unified project file
+          2. ``<stem>.correction.yaml``         — correction-only sidecar
+          3. ``correction.yaml``                — directory-level correction
+        """
+        p = Path(scene_path).resolve()
+        parent = p.parent
+        stem = p.name  # e.g. "google_test.e57"
+
+        # --- Unified project file ---
+        for ext in (".yaml", ".yml"):
+            candidate = parent / f"{stem}{ext}"
+            if candidate.exists():
+                try:
+                    with open(candidate) as f:
+                        data = yaml.safe_load(f) if HAS_YAML else {}
+                    if "correction" in data:
+                        c_data = data["correction"]
+                        c = SceneCorrection(
+                            rotate_x=float(c_data.get("rotate_x", 0)),
+                            rotate_y=float(c_data.get("rotate_y", 0)),
+                            rotate_z=float(c_data.get("rotate_z", 0)),
+                            shift_x=float(c_data.get("shift_x", 0)),
+                            shift_y=float(c_data.get("shift_y", 0)),
+                            shift_z=float(c_data.get("shift_z", 0)),
+                        )
+                        cli = self._cli_correction
+                        if cli.get('rotate_x', 0): c.rotate_x = cli['rotate_x']
+                        if cli.get('rotate_y', 0): c.rotate_y = cli['rotate_y']
+                        if cli.get('rotate_z', 0): c.rotate_z = cli['rotate_z']
+                        if cli.get('shift_x', 0): c.shift_x = cli['shift_x']
+                        if cli.get('shift_y', 0): c.shift_y = cli['shift_y']
+                        if cli.get('shift_z', 0): c.shift_z = cli['shift_z']
+                        self.viewport.scene_correction = c
+                        self.viewport.update()
+                        print(f"Correction loaded from project: {candidate.name}")
+                        self.status_label.setText(f"Project loaded: {candidate.name}")
+                except Exception as e:
+                    print(f"Warning: failed to parse project file {candidate.name}: {e}")
+                return
+        print(f"  No project file found for: {p.name}")
 
     # ------------------------------------------------------------------
     # Signal handlers

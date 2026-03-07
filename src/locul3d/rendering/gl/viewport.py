@@ -87,6 +87,7 @@ class BaseGLViewport(QOpenGLWidget):
 
         # Scene correction (rotation + shift for axis alignment)
         self.scene_correction = SceneCorrection()
+        self._correction_diag = None  # CorrectionDiagnostics for debug overlays
 
         # Panorama support (fully optional — see rendering/panorama/)
         self._panorama = PanoramaManager() if HAS_PANORAMA else None
@@ -281,6 +282,13 @@ class BaseGLViewport(QOpenGLWidget):
         if getattr(self, 'show_ground_plane', False):
             self._draw_ground_plane()
 
+        # Grid and axes in absolute world space (before correction)
+        # so they serve as a fixed reference for the scene alignment
+        if self.show_grid:
+            self._draw_grid()
+        if self.show_axes:
+            self._draw_axes()
+
         # Hook for subclass overlays drawn in global (pre-correction) space
         self._draw_global_overlays()
 
@@ -296,12 +304,6 @@ class BaseGLViewport(QOpenGLWidget):
                 glRotatef(sc.rotate_z, 0, 0, 1)
             if sc.shift_x != 0 or sc.shift_y != 0 or sc.shift_z != 0:
                 glTranslatef(sc.shift_x, sc.shift_y, sc.shift_z)
-
-        # Scene helpers
-        if self.show_grid:
-            self._draw_grid()
-        if self.show_axes:
-            self._draw_axes()
 
         # Enable scene clip planes (AABB clipping for all layers)
         clip = self.scene_clip
@@ -336,6 +338,10 @@ class BaseGLViewport(QOpenGLWidget):
         if clip is not None:
             for i in range(6):
                 glDisable(GL_CLIP_PLANE0 + i)
+
+        # Debug overlays for auto-detect diagnostics
+        if self._correction_diag is not None:
+            self._draw_correction_diagnostics()
 
     def _render_scene_from_station(self, pano_layer):
         """Render the scene from a panorama station's viewpoint.
@@ -667,28 +673,191 @@ class BaseGLViewport(QOpenGLWidget):
         pass
 
     def _draw_ground_plane(self):
-        """Draw a wireframe reference plane at global Z=0 (pre-correction).
+        """Draw a wireframe reference plane at absolute Z=0.
 
-        Bright cyan wireframe so it's clearly visible against the scene.
+        Drawn in world space BEFORE scene correction, so it stays fixed
+        regardless of rotation/shift — a true reference for floor alignment.
         """
         glDisable(GL_LIGHTING)
         glLineWidth(1.5)
         glColor4f(0.0, 0.9, 0.9, 0.6)  # cyan
 
         half = max(self._scene_radius * 1.5, 20.0)
-        cx = self._scene_center[0]
-        cy = self._scene_center[1]
         divs = 20
         step = half * 2 / divs
 
         glBegin(GL_LINES)
         for i in range(divs + 1):
             t = -half + i * step
-            glVertex3f(cx + t, cy - half, 0.0)
-            glVertex3f(cx + t, cy + half, 0.0)
-            glVertex3f(cx - half, cy + t, 0.0)
-            glVertex3f(cx + half, cy + t, 0.0)
+            # Centered on absolute origin (0, 0, 0)
+            glVertex3f(t, -half, 0.0)
+            glVertex3f(t,  half, 0.0)
+            glVertex3f(-half, t, 0.0)
+            glVertex3f( half, t, 0.0)
         glEnd()
+        glEnable(GL_LIGHTING)
+
+    def set_correction_diagnostics(self, diag):
+        """Set or clear diagnostic overlay data from auto-detection."""
+        self._correction_diag = diag
+        self.update()
+
+    def _draw_correction_diagnostics(self):
+        """Draw debug overlays showing voxelized wall surface detection.
+
+        Color-codes cells by their angle relative to the dominant direction:
+          - Green: cells aligned with dominant wall direction
+          - Blue: cells perpendicular to dominant direction
+          - Gray: outlier cells (other angles)
+          - Normal arrows: surface orientation (top cells only)
+          - Cyan crosshair: target axis alignment
+          - Magenta line: current dominant wall direction
+        """
+        import math as _m
+
+        diag = self._correction_diag
+        if diag is None:
+            return
+
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        # ── Wall-band points (very dim background) ────────────
+        if diag.wall_band_points is not None and len(diag.wall_band_points) > 0:
+            glPointSize(1.5)
+            glColor4f(0.9, 0.8, 0.0, 0.08)
+            pts = diag.wall_band_points
+            if len(pts) > 30000:
+                idx = np.random.default_rng(1).choice(len(pts), 30000, replace=False)
+                pts = pts[idx]
+            glBegin(GL_POINTS)
+            for p in pts:
+                glVertex3f(float(p[0]), float(p[1]), float(p[2]))
+            glEnd()
+
+        if not diag.wall_planes:
+            glEnable(GL_LIGHTING)
+            return
+
+        # Determine the peak angle for color-coding
+        peak = getattr(diag, 'peak_angle_deg', 0.0)
+
+        # Color-code each cell by its angle relative to the peak
+        # 0-10° from peak → green (parallel wall)
+        # 80-90° from peak → blue (perpendicular wall)
+        # else → dim gray (outlier)
+        scene_cx = float(np.mean([p.centroid[0] for p in diag.wall_planes]))
+        scene_cy = float(np.mean([p.centroid[1] for p in diag.wall_planes]))
+
+        for plane in diag.wall_planes:
+            cx, cy, cz = float(plane.centroid[0]), float(plane.centroid[1]), float(plane.centroid[2])
+            nx, ny, nz = float(plane.normal[0]), float(plane.normal[1]), float(plane.normal[2])
+            # Compute extent from bounding box
+            if hasattr(plane, 'bbox_max') and plane.bbox_max is not None:
+                span = plane.bbox_max - plane.bbox_min
+                ext = max(float(np.max(span)) * 0.5, 0.3)
+            else:
+                ext = max(getattr(plane, 'extent', 1.0) * 0.5, 0.3)
+
+            # Angle difference from peak (mod 90°)
+            diff = abs(plane.angle_deg - peak)
+            if diff > 45:
+                diff = 90 - diff
+
+            # Color by qualifying status
+            is_qualifying = getattr(plane, 'qualifying', False)
+            is_large = getattr(plane, 'area', 0) >= 5.0
+
+            if is_qualifying:
+                r, g, b, a = 0.0, 1.0, 0.3, 0.35   # bright green — qualifying
+            elif is_large:
+                r, g, b, a = 0.8, 0.4, 0.0, 0.2    # dim orange — large but not qualifying
+            else:
+                continue  # skip small non-qualifying surfaces
+
+            # Plane tangent vectors
+            up = np.array([0.0, 0.0, 1.0]) if abs(nz) < 0.9 else np.array([1.0, 0.0, 0.0])
+            t1 = np.cross(plane.normal, up)
+            t1 /= np.linalg.norm(t1) + 1e-10
+            t2 = np.cross(plane.normal, t1)
+            t2 /= np.linalg.norm(t2) + 1e-10
+
+            # Translucent cell quad
+            glColor4f(r, g, b, a)
+            corners = [
+                plane.centroid + ext * (-t1 - t2),
+                plane.centroid + ext * ( t1 - t2),
+                plane.centroid + ext * ( t1 + t2),
+                plane.centroid + ext * (-t1 + t2),
+            ]
+            glBegin(GL_QUADS)
+            for c in corners:
+                glVertex3f(float(c[0]), float(c[1]), float(c[2]))
+            glEnd()
+
+            # Wireframe outline
+            glColor4f(r, g, b, 0.6)
+            glLineWidth(1.0)
+            glBegin(GL_LINE_LOOP)
+            for c in corners:
+                glVertex3f(float(c[0]), float(c[1]), float(c[2]))
+            glEnd()
+
+        # ── Normal arrows for top qualifying surfaces ───────────
+        top = sorted(
+            [p for p in diag.wall_planes if getattr(p, 'area', 0) >= 5.0],
+            key=lambda p: p.point_count, reverse=True)[:20]
+        for plane in top:
+            cx, cy, cz = float(plane.centroid[0]), float(plane.centroid[1]), float(plane.centroid[2])
+            nx, ny, nz = float(plane.normal[0]), float(plane.normal[1]), float(plane.normal[2])
+            if getattr(plane, 'qualifying', False):
+                glColor4f(0.0, 1.0, 0.3, 1.0)
+            else:
+                glColor4f(0.8, 0.5, 0.0, 0.7)
+            if hasattr(plane, 'bbox_max') and plane.bbox_max is not None:
+                span = plane.bbox_max - plane.bbox_min
+                arrow_len = max(float(np.max(span)) * 0.4, 0.5)
+            else:
+                arrow_len = max(getattr(plane, 'extent', 1.0) * 0.8, 0.5)
+            glLineWidth(2.5)
+            glBegin(GL_LINES)
+            glVertex3f(cx, cy, cz)
+            glVertex3f(cx + nx * arrow_len, cy + ny * arrow_len, cz + nz * arrow_len)
+            glEnd()
+
+        # ── Correction direction indicators on Z=0 ────────────
+        if abs(diag.wall_correction_deg) > 0.001:
+            indicator_len = max(self._scene_radius * 0.3, 3.0)
+
+            # Cyan crosshair = target axes (what walls should align to)
+            glColor4f(0.0, 1.0, 1.0, 0.9)
+            glLineWidth(5.0)
+            glBegin(GL_LINES)
+            glVertex3f(scene_cx - indicator_len, scene_cy, 0.0)
+            glVertex3f(scene_cx + indicator_len, scene_cy, 0.0)
+            glEnd()
+            glBegin(GL_LINES)
+            glVertex3f(scene_cx, scene_cy - indicator_len, 0.0)
+            glVertex3f(scene_cx, scene_cy + indicator_len, 0.0)
+            glEnd()
+
+            # Magenta line = current dominant wall direction (before correction)
+            corr_rad = _m.radians(diag.wall_correction_deg)
+            before_dx = _m.cos(-corr_rad)
+            before_dy = _m.sin(-corr_rad)
+            glColor4f(1.0, 0.0, 1.0, 0.8)
+            glLineWidth(4.0)
+            glBegin(GL_LINES)
+            glVertex3f(scene_cx - before_dx * indicator_len,
+                       scene_cy - before_dy * indicator_len, 0.0)
+            glVertex3f(scene_cx + before_dx * indicator_len,
+                       scene_cy + before_dy * indicator_len, 0.0)
+            glEnd()
+
+        glLineWidth(1.0)
+        glPointSize(1.0)
+        glDisable(GL_BLEND)
         glEnable(GL_LIGHTING)
 
     # --- VBO Management ---

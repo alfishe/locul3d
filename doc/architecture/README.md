@@ -9,6 +9,7 @@ Technical documentation for the Locul3D 3D scanner data editor and viewer.
 | [Rendering Pipeline](rendering-pipeline.md) | OpenGL rendering, VBO management, stride-based LOD, GPU-side opacity, camera model, memory budget |
 | [Panorama Rendering](panorama-rendering.md) | 360° panorama extraction, cubemap assembly, scene-space & immersive modes, scanner support |
 | [E57 Import Pipeline](e57-import-pipeline.md) | E57 ingestion, filtering, alignment, decimation, layer building, panorama extraction |
+| [Scene Correction](scene-correction.md) | Multi-step floor & wall detection, voxelized normal estimation, surface classification, rotation optimization |
 | [Data Model](data-model.md) | `LayerData`, `LayerManager`, dtype safety, layer types, and data flow |
 
 ## Package Structure

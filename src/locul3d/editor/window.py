@@ -466,33 +466,11 @@ class EditorWindow(QMainWindow):
             self._load_folder(folder)
 
     def _import_e57_file(self, path: str):
-        """Import E57 file through the full processing pipeline."""
+        """Import E57 file through the full processing pipeline.
 
-        # --- Correction sidecar detection ---
-        scene_p = Path(path).resolve()
-        print(f"[E57] Searching for correction sidecar in: {scene_p.parent}/")
-        sidecar = SceneCorrection.find_sidecar(str(scene_p))
-        correction = None
-        if sidecar:
-            try:
-                correction = SceneCorrection.load_yaml(sidecar)
-                cli = self._cli_correction
-                if cli.get('rotate_x', 0): correction.rotate_x = cli['rotate_x']
-                if cli.get('rotate_y', 0): correction.rotate_y = cli['rotate_y']
-                if cli.get('rotate_z', 0): correction.rotate_z = cli['rotate_z']
-                if cli.get('shift_x', 0): correction.shift_x = cli['shift_x']
-                if cli.get('shift_y', 0): correction.shift_y = cli['shift_y']
-                if cli.get('shift_z', 0): correction.shift_z = cli['shift_z']
-                print(f"[E57] Correction LOADED from: {sidecar}")
-                print(f"[E57]   rot=({correction.rotate_x}, {correction.rotate_y}, {correction.rotate_z})°  "
-                      f"shift=({correction.shift_x}, {correction.shift_y}, {correction.shift_z})")
-                self.status_label.setText(f"Correction loaded: {Path(sidecar).name}")
-            except Exception as e:
-                print(f"[E57] WARNING: failed to load correction sidecar: {e}")
-                correction = None
-        else:
-            print(f"[E57] No correction sidecar found for: {scene_p.name}")
-
+        Correction and annotations are handled separately via the unified
+        project YAML file (loaded by _try_load_sidecar after import).
+        """
         # --- E57 import ---
         try:
             from ..plugins.importers.e57 import (
@@ -516,15 +494,6 @@ class EditorWindow(QMainWindow):
 
         result = dialog.get_result()
         if result and result.layers:
-            # Bake correction into point data (scene coords → global coords)
-            if correction and not correction.is_identity:
-                import numpy as np
-                for layer in result.layers:
-                    if layer.points is not None and len(layer.points) > 0:
-                        layer.points = correction.bake_points(layer.points).astype(np.float32)
-                    if hasattr(layer, 'pano_position') and layer.pano_position is not None:
-                        pos = correction.transform_point(layer.pano_position)
-                        layer.pano_position = pos.tolist()
 
             for layer in result.layers:
                 self.layer_manager.layers.append(layer)
@@ -783,16 +752,30 @@ class EditorWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _save_yaml(self, path: str):
-        """Serialise annotations, planes, and reference point to YAML or JSON.
+        """Serialise the unified project file (annotations, planes, correction).
 
+        All sections are optional — only non-empty sections are written.
         Format depends on whether PyYAML is installed (HAS_YAML).
         Updates window title and status bar on success.
         """
         data = {
             "default_column_size": DEFAULT_SIZES["mts_column"].tolist(),
             "default_box_size": DEFAULT_SIZES["mts_box"].tolist(),
-            "bboxes": [b.to_dict() for b in self.annotations],
         }
+        # Scene correction
+        corr = self.gl_viewport.scene_correction
+        if corr is not None and not corr.is_identity:
+            data["correction"] = {
+                "rotate_x": round(corr.rotate_x, 4),
+                "rotate_y": round(corr.rotate_y, 4),
+                "rotate_z": round(corr.rotate_z, 4),
+                "shift_x": round(corr.shift_x, 4),
+                "shift_y": round(corr.shift_y, 4),
+                "shift_z": round(corr.shift_z, 4),
+            }
+        # Annotations
+        if self.annotations:
+            data["bboxes"] = [b.to_dict() for b in self.annotations]
         if self.planes:
             data["planes"] = [p.to_dict() for p in self.planes]
         if self._ref_point is not None:
@@ -805,12 +788,22 @@ class EditorWindow(QMainWindow):
             with open(path, "w") as f:
                 json.dump(data, f, indent=2)
         self._yaml_path = path
-        self.status_label.setText(
-            f"Saved {len(self.annotations)} bboxes + {len(self.planes)} planes to {Path(path).name}")
+        parts = []
+        if self.annotations: parts.append(f"{len(self.annotations)} bboxes")
+        if self.planes: parts.append(f"{len(self.planes)} planes")
+        if corr and not corr.is_identity: parts.append("correction")
+        summary = ", ".join(parts) if parts else "empty"
+        self.status_label.setText(f"Saved {summary} to {Path(path).name}")
         self.setWindowTitle(f"Locul3D Editor — {Path(path).name}")
 
     def _load_yaml(self, path: str):
-        """Load annotations, planes, and reference point from a YAML/JSON file.
+        """Load annotations, planes, correction, and reference point from YAML/JSON.
+
+        This is the unified project file loader.  Supports all sections:
+          - ``bboxes``          — annotation boxes (center+size or min+max)
+          - ``planes``          — reference planes
+          - ``reference_point`` — coordinate reference point
+          - ``correction``      — scene rotation/shift correction
 
         Replaces all existing annotations and planes.
         Updates window title and status bar.
@@ -820,6 +813,7 @@ class EditorWindow(QMainWindow):
                 data = yaml.safe_load(f)
             else:
                 data = json.load(f)
+        # --- Annotations ---
         self.annotations.clear()
         for entry in data.get("bboxes", []):
             self.annotations.append(BBoxItem.from_dict(entry))
@@ -831,13 +825,42 @@ class EditorWindow(QMainWindow):
             self._ref_point = np.array(rp, dtype=np.float64)
             self.gl_viewport.ref_point = self._ref_point
             self.ref_panel.set_ref_point(rp[0], rp[1], rp[2])
+        # --- Scene correction (optional) ---
+        if "correction" in data:
+            c = data["correction"]
+            corr = SceneCorrection(
+                rotate_x=float(c.get("rotate_x", 0)),
+                rotate_y=float(c.get("rotate_y", 0)),
+                rotate_z=float(c.get("rotate_z", 0)),
+                shift_x=float(c.get("shift_x", 0)),
+                shift_y=float(c.get("shift_y", 0)),
+                shift_z=float(c.get("shift_z", 0)),
+            )
+            # CLI overrides
+            cli = self._cli_correction
+            if cli.get('rotate_x', 0): corr.rotate_x = cli['rotate_x']
+            if cli.get('rotate_y', 0): corr.rotate_y = cli['rotate_y']
+            if cli.get('rotate_z', 0): corr.rotate_z = cli['rotate_z']
+            if cli.get('shift_x', 0): corr.shift_x = cli['shift_x']
+            if cli.get('shift_y', 0): corr.shift_y = cli['shift_y']
+            if cli.get('shift_z', 0): corr.shift_z = cli['shift_z']
+            self.gl_viewport.scene_correction = corr
+            self.gl_viewport.update()
+        # --- UI update ---
         self._yaml_path = path
         self.bbox_panel.rebuild_list()
         self.plane_panel.rebuild_list()
         self.gl_viewport.selected_idx = -1
         self.gl_viewport.update()
-        self.status_label.setText(
-            f"Loaded {len(self.annotations)} bboxes + {len(self.planes)} planes from {Path(path).name}")
+        n_bbox = len(self.annotations)
+        n_plane = len(self.planes)
+        has_corr = "correction" in data
+        parts = []
+        if n_bbox: parts.append(f"{n_bbox} bboxes")
+        if n_plane: parts.append(f"{n_plane} planes")
+        if has_corr: parts.append("correction")
+        summary = ", ".join(parts) if parts else "empty"
+        self.status_label.setText(f"Loaded {summary} from {Path(path).name}")
         self.setWindowTitle(f"Locul3D Editor — {Path(path).name}")
 
     def _on_save_yaml(self):
@@ -943,42 +966,84 @@ class EditorWindow(QMainWindow):
             f"Scene clip: X=[{x0:.1f},{x1:.1f}] Y=[{y0:.1f},{y1:.1f}] Z=[{z0:.1f},{z1:.1f}]")
 
     def _on_scene_correction(self):
-        """Open the Scene Correction dialog for live rotation/shift adjustment."""
+        """Open or raise the non-modal Scene Correction dialog."""
+        # Reuse existing dialog if already open
+        if hasattr(self, '_correction_dlg') and self._correction_dlg is not None:
+            self._correction_dlg.raise_()
+            self._correction_dlg.activateWindow()
+            return
+
         scene_dir = self.layer_manager.base_dir or ""
-        dlg = CorrectionDialog(self.gl_viewport.scene_correction, scene_dir, self)
+        corr = self.gl_viewport.scene_correction or SceneCorrection()
+
+        dlg = CorrectionDialog(
+            corr, scene_dir, parent=self,
+            point_source=self._collect_all_points,
+        )
         dlg.correction_changed.connect(self._apply_correction)
-        dlg.exec()
+        dlg.save_requested.connect(self._on_save_correction_to_project)
+        dlg.diagnostics_ready.connect(self._on_diag_ready)
+        dlg.destroyed.connect(self._on_correction_dlg_closed)
+        self._correction_dlg = dlg
+        dlg.show()
 
     def _apply_correction(self, c: SceneCorrection):
         """Apply correction values from dialog to viewport (live preview)."""
         self.gl_viewport.scene_correction = c
         self.gl_viewport.update()
 
+    def _on_diag_ready(self, diag):
+        """Show auto-detect debug overlays in the viewport."""
+        self.gl_viewport.set_correction_diagnostics(diag)
+
+    def _on_correction_dlg_closed(self):
+        """Clear diagnostics and dialog reference when dialog closes."""
+        self._correction_dlg = None
+        self.gl_viewport.set_correction_diagnostics(None)
+
+    def _on_save_correction_to_project(self):
+        """Save current state (including correction) to the project YAML."""
+        if not self._yaml_path:
+            # No YAML path yet — trigger Save As
+            self._on_save_as_yaml()
+        else:
+            self._save_yaml(self._yaml_path)
+            self.status_label.setText(
+                f"Correction saved to {Path(self._yaml_path).name}")
+
+    def _collect_all_points(self):
+        """Collect all visible point cloud data for auto-detection."""
+        import numpy as np
+        all_pts = []
+        for layer in self.layer_manager.layers:
+            if not layer.visible:
+                continue
+            if hasattr(layer, 'points') and layer.points is not None:
+                all_pts.append(np.asarray(layer.points, dtype=np.float64))
+        if not all_pts:
+            return None
+        return np.vstack(all_pts)
+
     def _try_load_sidecar(self, scene_path: str):
-        """Auto-detect and load a correction YAML sidecar next to a scene file."""
-        p = Path(scene_path).resolve()  # resolve to absolute path
-        print(f"Searching for correction sidecar in: {p.parent}/")
-        sidecar = SceneCorrection.find_sidecar(str(p))
-        if sidecar is None:
-            print(f"  No correction sidecar found for: {p.name}")
-            return
-        try:
-            c = SceneCorrection.load_yaml(sidecar)
-            cli = self._cli_correction
-            if cli.get('rotate_x', 0): c.rotate_x = cli['rotate_x']
-            if cli.get('rotate_y', 0): c.rotate_y = cli['rotate_y']
-            if cli.get('rotate_z', 0): c.rotate_z = cli['rotate_z']
-            if cli.get('shift_x', 0): c.shift_x = cli['shift_x']
-            if cli.get('shift_y', 0): c.shift_y = cli['shift_y']
-            if cli.get('shift_z', 0): c.shift_z = cli['shift_z']
-            self.gl_viewport.scene_correction = c
-            self.gl_viewport.update()
-            print(f"Scene correction loaded from: {sidecar}")
-            print(f"  rot=({c.rotate_x}, {c.rotate_y}, {c.rotate_z})°  "
-                  f"shift=({c.shift_x}, {c.shift_y}, {c.shift_z})")
-            self.status_label.setText(f"Correction loaded: {Path(sidecar).name}")
-        except Exception as e:
-            print(f"Warning: failed to load correction sidecar: {e}")
+        """Auto-detect and load a unified project file or correction sidecar.
+
+        Search order:
+          1. ``<stem>.yaml`` / ``<stem>.yml``   — unified project file
+          2. ``<stem>.correction.yaml``         — correction-only sidecar
+          3. ``correction.yaml``                — directory-level correction
+        """
+        p = Path(scene_path).resolve()
+        parent = p.parent
+        stem = p.name  # e.g. "google_test.e57"
+
+        # --- Unified project file ---
+        for ext in (".yaml", ".yml"):
+            candidate = parent / f"{stem}{ext}"
+            if candidate.exists():
+                print(f"Project file found: {candidate.name}")
+                self._load_yaml(str(candidate))
+                return
+        print(f"  No project file found for: {p.name}")
 
     def _on_toggle_layer_colors(self, checked):
         """Toggle per-layer color tinting — evicts caches and VBOs for full re-upload."""

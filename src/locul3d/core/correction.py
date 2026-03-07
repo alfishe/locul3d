@@ -119,12 +119,12 @@ class SceneCorrection:
     def as_dict(self) -> dict:
         return {
             "correction": {
-                "rotate_x": self.rotate_x,
-                "rotate_y": self.rotate_y,
-                "rotate_z": self.rotate_z,
-                "shift_x": self.shift_x,
-                "shift_y": self.shift_y,
-                "shift_z": self.shift_z,
+                "rotate_x": float(self.rotate_x),
+                "rotate_y": float(self.rotate_y),
+                "rotate_z": float(self.rotate_z),
+                "shift_x": float(self.shift_x),
+                "shift_y": float(self.shift_y),
+                "shift_z": float(self.shift_z),
             }
         }
 
