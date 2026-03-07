@@ -34,6 +34,13 @@ E57 support (pye57, Pillow) is included in requirements.txt — no extra install
 - Fine-tune alignment: Arrow keys (yaw/pitch), Q/E (roll), Shift for 1° steps
 - **Esc** to exit panorama mode
 
+### 5. Scene Clipping
+
+- Click **Scene** in the toolbar to see scene bounds
+- Click **Hide Ceiling** for automatic ceiling removal
+- Adjust any axis min/max to clip the view — changes apply in real-time
+- Click **Reset** to restore the full scene
+
 ### Trouble?
 
 ```bash
