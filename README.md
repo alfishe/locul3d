@@ -142,6 +142,45 @@ The **Scene** toolbar button (available in both Viewer and Editor) opens a non-m
 
 ---
 
+## 📦 BBox Annotations
+
+### Coordinate Modes
+
+Each bbox stores its coordinates in one of two formats — **per-bbox**, toggled via the **Center/Corners** button in the property panel:
+
+| Mode | Stored as | Panel shows |
+|------|-----------|-------------|
+| **Center** (default) | `center` + `size` | Center X/Y/Z + Size X/Y/Z |
+| **Corners** | `min` + `max` | Min Corner X/Y/Z + Max Corner X/Y/Z |
+
+The mode is preserved per-bbox on save/load — a single file can contain both formats:
+
+```yaml
+bboxes:
+- label: column_A
+  center: [1.0, 2.0, 1.5]
+  size: [0.8, 0.6, 3.0]
+  color: [1.0, 0.5, 0.0]
+- label: search_region
+  min: [-6.6, -14.2, 0.0]
+  max: [2.9, -3.4, 5.2]
+  color: [0.0, 0.8, 1.0]
+  fill_opacity: 0.09
+```
+
+### Fill Surfaces
+
+Use the **Fill** slider (0–100%) to render translucent filled faces on any bbox. Fill opacity is saved as `fill_opacity` in the YAML.
+
+### Gizmo Interaction
+
+- **Move arrows** — drag along axis to translate
+- **Scale handles** — drag face handles to resize
+  - *Center mode* — symmetric resize from center
+  - *Corners mode* — one face moves, opposite face stays fixed
+- **Rotation ring** — drag to rotate around Z axis
+- Scale handles take priority over move arrows to prevent accidental activation
+
 ## �📦 Installation
 
 ### Requirements

@@ -16,6 +16,7 @@ class BBoxItem:
         self.color = list(color) if color is not None else list([1.0, 0.5, 0.0])
         self.visible = visible
         self.fill_opacity = float(fill_opacity)  # 0=wireframe, >0=filled faces
+        self.save_format = "center"  # "center" or "corners" — per-item
 
         # Accept either center+size or min+max
         if bb_min is not None and bb_max is not None:
@@ -65,13 +66,21 @@ class BBoxItem:
             local[:, 1] = s * x + c * y
         return local + self.center_pos
 
-    def to_dict(self):
-        d = {
-            "label": self.label,
-            "center": [round(float(v), 4) for v in self.center_pos],
-            "size": [round(float(v), 4) for v in self.size],
-            "color": [round(float(v), 3) for v in self.color],
-        }
+    def to_dict(self, format=None):
+        """Serialise bbox to dict.
+
+        Args:
+            format: 'center' or 'corners'. Defaults to this item's save_format.
+        """
+        fmt = format or self.save_format
+        d = {"label": self.label}
+        if fmt == "corners":
+            d["min"] = [round(float(v), 4) for v in self.bb_min]
+            d["max"] = [round(float(v), 4) for v in self.bb_max]
+        else:
+            d["center"] = [round(float(v), 4) for v in self.center_pos]
+            d["size"] = [round(float(v), 4) for v in self.size]
+        d["color"] = [round(float(v), 3) for v in self.color]
         if self.rotation_z != 0.0:
             d["rotation_z"] = round(float(self.rotation_z), 2)
         if self.fill_opacity > 0.0:
@@ -90,6 +99,7 @@ class BBoxItem:
                 color=d.get("color"),
             )
             item.fill_opacity = d.get("fill_opacity", 0.0)
+            item.save_format = "center"
             return item
         else:
             item = cls(
@@ -100,6 +110,7 @@ class BBoxItem:
                 color=d.get("color"),
             )
             item.fill_opacity = d.get("fill_opacity", 0.0)
+            item.save_format = "corners"
             return item
 
     def __repr__(self):

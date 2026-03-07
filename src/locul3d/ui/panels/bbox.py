@@ -289,9 +289,10 @@ class BBoxPanel(QWidget):
             self._pos_mode = "center"
         self._apply_pos_mode()
         self.pos_mode_changed.emit(self._pos_mode)
-        # Refresh values in the new mode
+        # Update the selected bbox's save format
         idx = self.list_widget.currentRow()
         if 0 <= idx < len(self.annotations):
+            self.annotations[idx].save_format = self._pos_mode
             self._populate_props(idx)
 
     def _apply_pos_mode(self):
@@ -410,6 +411,14 @@ class BBoxPanel(QWidget):
             return
         self.prop_frame.setEnabled(True)
         bbox = self.annotations[idx]
+
+        # Restore this item's position mode
+        item_mode = getattr(bbox, 'save_format', 'center')
+        if item_mode != self._pos_mode:
+            self._pos_mode = item_mode
+            self._apply_pos_mode()
+            self.pos_mode_changed.emit(self._pos_mode)
+
         self._updating = True
         self.label_combo.setCurrentText(bbox.label)
         display_pos = bbox.center_pos.copy()
