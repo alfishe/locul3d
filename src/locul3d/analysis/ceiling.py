@@ -89,10 +89,11 @@ class CeilingDetector:
             peak_density = float(conv.max()) / window
             peak_idx = int(np.argmax(conv))
 
-        # Require clear ceiling surface (3× median density)
+        # Require a noticeable ceiling surface (1.5× median density).
+        # Scenes without ceiling have no upper-region concentration.
         nonzero = counts[counts > 0]
         median_density = float(np.median(nonzero)) if len(nonzero) > 0 else 0
-        if peak_density < median_density * 3:
+        if peak_density < median_density * 1.5:
             return None
 
         return float(upper_centers[peak_idx])

@@ -24,9 +24,36 @@ from ..ui.dialogs.scene_dialog import SceneDialog
 
 
 class ViewerWindow(QMainWindow):
-    """Locul3D Viewer — point cloud / mesh / wireframe / E57 viewer."""
+    """Locul3D Viewer — read-only 3D scene viewer.
+
+    Supports point clouds (.ply), meshes (.obj, .stl), and E57 scan files.
+    Provides panorama viewing, layer management, scene correction, and
+    scene clipping via the Scene dialog.
+
+    Architecture:
+        - viewport:       BaseGLViewport — OpenGL rendering widget
+        - layer_manager:  LayerManager   — owns all loaded LayerData
+        - layer_panel:    LayerPanel     — sidebar for visibility/opacity
+        - info_panel:     InfoPanel      — metadata display for selected layer
+        - theme:          ThemeManager   — dark/light stylesheet generation
+
+    Lifecycle:
+        1. __init__ creates UI, wires signals, optionally defers file loading
+        2. _deferred_load runs after event loop starts (100ms delay)
+        3. _post_load triggers background AABB/ceiling caching after any load
+        4. File-watch timer polls every 2s for on-disk changes (hot reload)
+    """
 
     def __init__(self, files=None, correction_angles=None, parent=None):
+        """Initialise the Viewer window.
+
+        Args:
+            files:             List of file/folder paths to load on startup.
+                               Loading is deferred 100ms to let the event loop start.
+            correction_angles: Dict with rotate_x/y/z and shift_x/y/z overrides
+                               (applied to viewport.scene_correction on startup).
+            parent:            Optional parent QWidget.
+        """
         super().__init__(parent)
         self.setWindowTitle("Locul3D — Viewer")
         self.resize(1280, 800)
@@ -85,6 +112,7 @@ class ViewerWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _setup_ui(self):
+        """Create the central widget layout with the GL viewport filling it."""
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -92,6 +120,15 @@ class ViewerWindow(QMainWindow):
         self.setCentralWidget(central)
 
     def _setup_toolbar(self):
+        """Build the main toolbar with file, view, camera, and tool actions.
+
+        Toolbar items (left to right):
+          File:   Open File, Open Folder, Import E57
+          View:   Layer Colors (checkable), Axes, Grid
+          Size:   Point size slider (1-20)
+          Camera: Preset dropdown, Fit All, Screenshot
+          Tools:  Scene, Scene Correction
+        """
         toolbar = QToolBar("Main Toolbar")
         toolbar.setIconSize(QSize(20, 20))
         toolbar.setMovable(False)
@@ -171,6 +208,10 @@ class ViewerWindow(QMainWindow):
         toolbar.addAction(act_correction)
 
     def _setup_sidebar(self):
+        """Create right-side dock widgets: Layers panel and Info panel.
+
+        Layers and Info are tabified; Layers tab is raised by default.
+        """
         # Layers dock
         self._layers_dock = QDockWidget("Layers", self)
         self._layers_dock.setAllowedAreas(
@@ -193,6 +234,7 @@ class ViewerWindow(QMainWindow):
         self._layers_dock.raise_()
 
     def _setup_statusbar(self):
+        """Create status bar with status text, camera info, and FPS counter."""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_label = QLabel("Ready")
@@ -206,7 +248,18 @@ class ViewerWindow(QMainWindow):
     # File loading
     # ------------------------------------------------------------------
 
+    def _post_load(self):
+        """Called after any geometry load — refresh caches in background."""
+        self.layer_manager.invalidate_scene_aabb()
+        QTimer.singleShot(0, self.layer_manager.compute_ceiling_background)
+
     def _deferred_load(self):
+        """Load files passed via __init__ after the event loop starts.
+
+        Directories are loaded via _load_folder, .e57 via _import_e57_file,
+        all other files via _load_file.  After loading, fits the camera,
+        triggers _post_load, and auto-detects correction sidecars.
+        """
         files = getattr(self, '_deferred_files', [])
         for arg in files:
             p = Path(arg)
@@ -218,13 +271,18 @@ class ViewerWindow(QMainWindow):
                 else:
                     self._load_file(str(p), fit_camera=False)
         self.viewport.fit_to_scene()
-        # Compute ceiling height silently in background (cached, not applied)
-        QTimer.singleShot(0, self.layer_manager.compute_ceiling_background)
+        self._post_load()
         # Auto-detect sidecar correction YAML
         if files:
             self._try_load_sidecar(files[0])
 
     def _on_open_file(self):
+        """Show file dialog to open one or more 3D files (.ply/.obj/.stl/.e57).
+
+        E57 files are routed through the full import pipeline with progress.
+        Other files are loaded directly. Auto-detects correction sidecar for
+        the first opened file.
+        """
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Open Files", "",
             "3D Files (*.ply *.obj *.stl *.e57);;All Files (*)")
@@ -238,11 +296,13 @@ class ViewerWindow(QMainWindow):
             self._try_load_sidecar(paths[0])
 
     def _on_open_folder(self):
+        """Show folder dialog and load all supported files from selected directory."""
         folder = QFileDialog.getExistingDirectory(self, "Open Folder")
         if folder:
             self._load_folder(folder)
 
     def _on_import_e57(self):
+        """Show file dialog specifically for E57 import with full pipeline."""
         path, _ = QFileDialog.getOpenFileName(
             self, "Import E57 File", "",
             "E57 Files (*.e57);;All Files (*)")
@@ -316,8 +376,18 @@ class ViewerWindow(QMainWindow):
             self.status_label.setText(
                 f"Imported E57: {n_layers} layers, {total_pts:,} points")
             self.setWindowTitle(f"Locul3D Viewer — {Path(path).name}")
+            self._post_load()
 
     def _load_file(self, path: str, fit_camera: bool = True):
+        """Load a single geometry file (.ply/.obj/.stl) as a new layer.
+
+        Args:
+            path:       Absolute path to the file.
+            fit_camera: If True, auto-fit camera after loading (disabled
+                        during batch loads to avoid repeated re-fitting).
+
+        After load, triggers _post_load() and auto-detects correction sidecar.
+        """
         self.status_label.setText(f"Loading {Path(path).name}...")
         QApplication.processEvents()
         try:
@@ -332,10 +402,18 @@ class ViewerWindow(QMainWindow):
         if last:
             self.info_panel.show_layer_info(last)
         self.status_label.setText(f"Loaded {Path(path).name}")
+        self._post_load()
         # Auto-detect correction sidecar
         self._try_load_sidecar(path)
 
     def _load_folder(self, folder: str):
+        """Load all geometry files from a folder.
+
+        Scans for .ply, .obj, .stl files and loads them without fitting camera
+        per file.  E57 files are routed through the import pipeline.
+        If a layers.json manifest exists, layer colors/names/visibility are
+        applied from it.  Camera is fitted once after all files load.
+        """
         folder_path = Path(folder)
         for ext in ("*.ply", "*.obj", "*.stl"):
             for p in sorted(folder_path.glob(ext)):
@@ -366,6 +444,7 @@ class ViewerWindow(QMainWindow):
             except Exception:
                 pass
         self.viewport.fit_to_scene()
+        self._post_load()
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
 
     # ------------------------------------------------------------------
@@ -373,6 +452,11 @@ class ViewerWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_toggle_layer_colors(self, checked):
+        """Toggle per-layer color tinting in the viewport.
+
+        When enabled, each layer is rendered with its assigned color.
+        Evicts all byte caches and VBOs to force re-upload with new colors.
+        """
         self.viewport.use_layer_colors = checked
         for l in self.layer_manager.layers:
             l.evict_byte_caches()
@@ -380,14 +464,21 @@ class ViewerWindow(QMainWindow):
         self.viewport.update()
 
     def _toggle_view(self, attr, checked):
+        """Generic toggle for viewport boolean attributes (show_axes, show_grid, etc.)."""
         setattr(self.viewport, attr, checked)
         self.viewport.update()
 
     def _on_point_size(self, val):
+        """Update GL point size from the toolbar slider (range 1-20)."""
         self.viewport.point_size = val
         self.viewport.update()
 
     def _on_camera_preset(self, name):
+        """Set camera to a named preset (Top/Front/Right/Isometric).
+
+        Does not change distance — only azimuth and elevation.
+        "Perspective" entry in the combo is a no-op (default orbital view).
+        """
         vp = self.viewport
         presets = {"Top": (0, 89), "Front": (0, 0), "Right": (90, 0), "Isometric": (45, 30)}
         if name in presets:
@@ -395,6 +486,11 @@ class ViewerWindow(QMainWindow):
             vp.update()
 
     def _on_screenshot(self):
+        """Save the current viewport contents to an image file.
+
+        Uses QWidget.grab() to capture the GL widget at screen resolution.
+        Supported formats depend on Qt image plugins (PNG, JPG, BMP).
+        """
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Screenshot", "screenshot.png",
             "Images (*.png *.jpg *.bmp);;All Files (*)")
@@ -470,20 +566,31 @@ class ViewerWindow(QMainWindow):
         self.layer_panel.highlight_active_pano(layer)
 
     def _on_layer_changed(self):
+        """Called when any layer's visibility or properties change — trigger redraw."""
         self.viewport.update()
 
     def _on_layer_selected(self, layer_data):
+        """Handle layer selection in the sidebar — update info panel and raise its dock."""
         self._selected_layer = layer_data
         self.info_panel.show_layer_info(layer_data)
         self._info_dock.raise_()
 
     def _on_fps_updated(self, fps):
+        """Update status bar with camera azimuth/elevation/distance and FPS.
+
+        Called by the viewport's fps_updated signal after each render frame.
+        """
         vp = self.viewport
         self.cam_label.setText(
             f"Az:{vp.cam_azimuth%360:.0f} El:{vp.cam_elevation:.0f} D:{vp.cam_distance:.1f}")
         self.fps_label.setText(f"FPS: {fps:.0f}")
 
     def _check_file_changes(self):
+        """Poll loaded files for on-disk changes (hot-reload).
+
+        Runs every 2 seconds via _file_watch_timer.  If any layer's source
+        file has been modified, reloads the geometry and rebuilds VBOs.
+        """
         any_changed = False
         for layer in self.layer_manager.layers:
             if layer.file_changed_on_disk():
@@ -498,6 +605,11 @@ class ViewerWindow(QMainWindow):
             self.viewport.update()
 
     def keyPressEvent(self, event):
+        """Handle global keyboard shortcuts.
+
+        Escape: exit panorama mode if active.
+        All other keys: forwarded to the default QMainWindow handler.
+        """
         key = event.key()
         if key == Qt.Key.Key_Escape:
             if (hasattr(self.viewport, '_panorama')
