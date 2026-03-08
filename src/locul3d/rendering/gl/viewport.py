@@ -826,39 +826,96 @@ class BaseGLViewport(QOpenGLWidget):
             glVertex3f(cx + nx * arrow_len, cy + ny * arrow_len, cz + nz * arrow_len)
             glEnd()
 
-        # ── Correction direction indicators on Z=0 ────────────
+        # ── Fiducial cross markers on Z=0 ─────────────────────
+        # NOTE: The GL modelview already includes the scene correction
+        # rotation (rotate_z).  To draw these markers in TRUE world
+        # coordinates we must counter-rotate by -rotate_z first.
+        glPushMatrix()
+        sc = self.scene_correction
+        if sc.rotate_z != 0:
+            glRotatef(-sc.rotate_z, 0, 0, 1)
+
+        grid_extent = max(self._scene_radius * 0.6, 8.0)
+        grid_spacing = 5.0   # metres between markers
+        cross_arm = 1.0      # half-length of each cross arm
+
+        # Blue markers — final position after alignment correction (axis-aligned = 0°)
+        self._draw_fiducial_grid(
+            cx=scene_cx, cy=scene_cy, cz=0.0,
+            angle_deg=0.0,
+            extent=grid_extent,
+            spacing=grid_spacing,
+            arm_len=cross_arm,
+            color=(0.3, 0.5, 1.0, 0.7),
+            line_width=2.0
+        )
+
+        # Magenta cross = original scene position detected by wall planes
         if abs(diag.wall_correction_deg) > 0.001:
-            indicator_len = max(self._scene_radius * 0.3, 3.0)
+            indicator_len = max(self._scene_radius * 0.4, 5.0)
+            self._draw_fiducial_cross(
+                cx=scene_cx, cy=scene_cy, cz=0.0,
+                angle_deg=-diag.wall_correction_deg,
+                arm_len=indicator_len,
+                color=(1.0, 0.0, 1.0, 0.8),
+                line_width=4.0
+            )
 
-            # Cyan crosshair = target axes (what walls should align to)
-            glColor4f(0.0, 1.0, 1.0, 0.9)
-            glLineWidth(5.0)
-            glBegin(GL_LINES)
-            glVertex3f(scene_cx - indicator_len, scene_cy, 0.0)
-            glVertex3f(scene_cx + indicator_len, scene_cy, 0.0)
-            glEnd()
-            glBegin(GL_LINES)
-            glVertex3f(scene_cx, scene_cy - indicator_len, 0.0)
-            glVertex3f(scene_cx, scene_cy + indicator_len, 0.0)
-            glEnd()
-
-            # Magenta line = current dominant wall direction (before correction)
-            corr_rad = _m.radians(diag.wall_correction_deg)
-            before_dx = _m.cos(-corr_rad)
-            before_dy = _m.sin(-corr_rad)
-            glColor4f(1.0, 0.0, 1.0, 0.8)
-            glLineWidth(4.0)
-            glBegin(GL_LINES)
-            glVertex3f(scene_cx - before_dx * indicator_len,
-                       scene_cy - before_dy * indicator_len, 0.0)
-            glVertex3f(scene_cx + before_dx * indicator_len,
-                       scene_cy + before_dy * indicator_len, 0.0)
-            glEnd()
+        glPopMatrix()
 
         glLineWidth(1.0)
         glPointSize(1.0)
         glDisable(GL_BLEND)
         glEnable(GL_LIGHTING)
+
+    def _draw_fiducial_cross(self, cx: float, cy: float, cz: float, 
+                             angle_deg: float, arm_len: float, 
+                             color: tuple[float, float, float, float], 
+                             line_width: float):
+        """Draw a single rotated cross at (cx, cy, cz)."""
+        import math as _m
+        rad = _m.radians(angle_deg)
+        cos_a = _m.cos(rad)
+        sin_a = _m.sin(rad)
+
+        glColor4f(*color)
+        glLineWidth(line_width)
+        glBegin(GL_LINES)
+        # Arm 1
+        glVertex3f(cx - arm_len * cos_a, cy - arm_len * sin_a, cz)
+        glVertex3f(cx + arm_len * cos_a, cy + arm_len * sin_a, cz)
+        # Arm 2 (perpendicular)
+        glVertex3f(cx + arm_len * sin_a, cy - arm_len * cos_a, cz)
+        glVertex3f(cx - arm_len * sin_a, cy + arm_len * cos_a, cz)
+        glEnd()
+
+    def _draw_fiducial_grid(self, cx: float, cy: float, cz: float, 
+                           angle_deg: float, extent: float, spacing: float, 
+                           arm_len: float, color: tuple[float, float, float, float], 
+                           line_width: float):
+        """Draw a grid of small rotated crosses within 'extent' distance of (cx, cy)."""
+        import math as _m
+        rad = _m.radians(angle_deg)
+        cos_a = _m.cos(rad)
+        sin_a = _m.sin(rad)
+
+        n_lines = int(extent / spacing) + 1
+        glLineWidth(line_width)
+        glColor4f(*color)
+        for ix in range(-n_lines, n_lines + 1):
+            for iy in range(-n_lines, n_lines + 1):
+                px = cx + ix * spacing
+                py = cy + iy * spacing
+                # Arm 1
+                glBegin(GL_LINES)
+                glVertex3f(px - arm_len * cos_a, py - arm_len * sin_a, cz)
+                glVertex3f(px + arm_len * cos_a, py + arm_len * sin_a, cz)
+                glEnd()
+                # Arm 2 (perpendicular)
+                glBegin(GL_LINES)
+                glVertex3f(px + arm_len * sin_a, py - arm_len * cos_a, cz)
+                glVertex3f(px - arm_len * sin_a, py + arm_len * cos_a, cz)
+                glEnd()
 
     # --- VBO Management ---
 
