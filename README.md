@@ -236,8 +236,22 @@ When auto-detect runs, the viewport shows diagnostic overlays:
 | 🟢 Bright green quads | **Qualifying** surfaces (used for angle computation) |
 | 🟠 Dim orange quads | Large but **non-qualifying** surfaces |
 | Green arrows | Surface normals (top 20 surfaces by point count) |
-| Cyan crosshair (Z=0) | Target X/Y axes (what walls should align to) |
-| Magenta line (Z=0) | Current dominant wall direction (before correction) |
+| 🔵 Blue `+` grid (Z=0) | **Target** axis-aligned world coordinates — walls align to these after correction |
+| 🟣 Magenta `+` cross (Z=0) | **Original** detected wall direction before correction was applied |
+
+##### Fiducial Marker Coordinate Spaces
+
+The fiducial markers are drawn in **true world coordinates**, independent of the GL scene correction transform. Since the GL modelview matrix includes `rotate_z` (the wall alignment correction), the marker drawing code counter-rotates via `glRotatef(-rotate_z, 0, 0, 1)` inside a `glPushMatrix/glPopMatrix` pair. This ensures:
+
+- **Blue grid** (`angle_deg=0°`): Arms along pure X and Y — always parallel to the ground plane grid
+- **Magenta cross** (`angle_deg=-wall_correction_deg`): Tilted to show where walls were before correction
+
+Both markers are rendered via reusable helper methods:
+
+| Method | Purpose |
+|--------|---------|
+| `_draw_fiducial_grid(cx, cy, cz, angle_deg, extent, spacing, arm_len, color, line_width)` | Grid of small rotated crosses within a bounding area |
+| `_draw_fiducial_cross(cx, cy, cz, angle_deg, arm_len, color, line_width)` | Single large rotated cross at a point |
 
 Overlays clear automatically when the correction dialog is closed.
 
