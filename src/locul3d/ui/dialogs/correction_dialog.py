@@ -26,8 +26,10 @@ class _AutoDetectWorker(QThread):
         try:
             from ...analysis.scene_correction import auto_detect_correction
             corr, diag = auto_detect_correction(self._points)
+            self._points = None  # release memory
             self.finished.emit(corr, diag)
         except Exception as e:
+            self._points = None  # release memory
             self.error.emit(str(e))
 
 
@@ -225,10 +227,26 @@ class CorrectionDialog(QDialog):
         self._correction = c
         self.correction_changed.emit(c)
 
+    def _shutdown_worker(self):
+        """Wait for any running worker thread and clean it up."""
+        if self._worker is not None:
+            self._worker.wait()
+            self._worker.deleteLater()
+            self._worker = None
+
+    def closeEvent(self, event):
+        """Ensure worker thread is finished before allowing close."""
+        self._shutdown_worker()
+        super().closeEvent(event)
+
     def _on_auto_detect(self):
         """Run auto-detection in a background thread."""
         if self._point_source is None:
             return
+
+        # Wait for any previous worker to finish
+        self._shutdown_worker()
+
         points = self._point_source()
         if points is None or len(points) < 100:
             QMessageBox.warning(
@@ -240,7 +258,10 @@ class CorrectionDialog(QDialog):
         self._btn_auto.setText("Analyzing…")
         self._progress.show()
 
-        self._worker = _AutoDetectWorker(points, self)
+        # NOTE: Do NOT parent the worker to `self` — Qt would try to
+        # destroy it during the dialog's child-cleanup, crashing if
+        # the thread is still running.
+        self._worker = _AutoDetectWorker(points)
         self._worker.finished.connect(self._on_auto_detect_done)
         self._worker.error.connect(self._on_auto_detect_error)
         self._worker.start()
@@ -250,7 +271,7 @@ class CorrectionDialog(QDialog):
         self._progress.hide()
         self._btn_auto.setEnabled(True)
         self._btn_auto.setText("⚡ Auto-Detect")
-        self._worker = None
+        self._shutdown_worker()
 
         self._load_values(corr)
         self._correction = corr
@@ -261,7 +282,7 @@ class CorrectionDialog(QDialog):
         self._progress.hide()
         self._btn_auto.setEnabled(True)
         self._btn_auto.setText("⚡ Auto-Detect")
-        self._worker = None
+        self._shutdown_worker()
         QMessageBox.warning(self, "Auto-Detect Error", msg)
 
     def _on_load(self):
