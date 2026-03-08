@@ -360,9 +360,10 @@ def _detect_wall_angle_surfaces(
         gx = key % nx_cells
         gy = key // nx_cells
         angle = math.degrees(math.atan2(normal[1], normal[0])) % 90.0
+        raw_angle = math.degrees(math.atan2(normal[1], normal[0]))  # 0..180
         cells[key] = {
             'normal': normal, 'n_pts': n_pts, 'centroid': centroid,
-            'gx': gx, 'gy': gy, 'angle': angle,
+            'gx': gx, 'gy': gy, 'angle': angle, 'raw_angle': raw_angle,
             'pts_min': cell_pts.min(axis=0), 'pts_max': cell_pts.max(axis=0),
         }
 
@@ -379,8 +380,10 @@ def _detect_wall_angle_surfaces(
         if key in visited:
             continue
 
-        # BFS flood-fill — compare all to seed angle
-        seed_angle = cell['angle']
+        # BFS flood-fill — compare all to seed raw angle
+        # Use RAW angles (not mod-90) so perpendicular walls
+        # don't merge into one surface.
+        seed_raw = cell['raw_angle']
         queue = deque([key])
         visited.add(key)
         component = [key]
@@ -394,10 +397,7 @@ def _detect_wall_angle_surfaces(
                 nkey = (gx + dx) + (gy + dy) * nx_cells
                 if nkey in visited or nkey not in cells:
                     continue
-                # Compare to SEED angle (not neighbor's angle)
-                diff = abs(cells[nkey]['angle'] - seed_angle)
-                if diff > 45:
-                    diff = 90 - diff
+                diff = abs(cells[nkey]['raw_angle'] - seed_raw)
                 if diff > 15:  # merge tolerance vs seed
                     continue
                 visited.add(nkey)
