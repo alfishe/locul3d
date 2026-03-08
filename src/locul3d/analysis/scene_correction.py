@@ -150,6 +150,22 @@ def auto_detect_correction(
     diag = CorrectionDiagnostics(total_points=len(points))
     result = SceneCorrection()
 
+    # Deterministic subsample: use a coordinate-based spatial hash so
+    # the *same* subset is selected regardless of input array ordering
+    # (Open3D voxel_down_sample can reorder points across process runs).
+    # This is O(N) — far cheaper than lexsort on millions of points.
+    _MAX_DETECT = 2_000_000
+    if len(points) > _MAX_DETECT:
+        # Hash each point by its quantised coordinates (1 mm grid)
+        q = (points * 1000.0).astype(np.int64)
+        h = q[:, 0] * np.int64(1000003) + q[:, 1] * np.int64(1000033) + q[:, 2]
+        del q
+        stride = max(len(points) // _MAX_DETECT, 2)
+        mask = (h % stride) == 0
+        del h
+        points = points[mask]
+        del mask
+
     print(f"  ── Auto-detect ({len(points):,} points) ──")
 
     # ── Step 1: Floor detection ──────────────────────────────
@@ -176,6 +192,7 @@ def auto_detect_correction(
     result.rotate_z, wall_diag = _detect_wall_angle_surfaces(
         corrected, wall_band_min, wall_band_max,
         min_surface_area, angle_tolerance)
+    del corrected  # free large array
 
     diag.wall_band_points = wall_diag.get('band_points')
     diag.surfaces = wall_diag.get('surfaces', [])

@@ -42,6 +42,24 @@ except ImportError:
     HAS_YAML = False
 
 
+def _make_project_dumper():
+    """YAML dumper: dicts block-style, scalar lists inline, dict lists block."""
+    class ProjectDumper(yaml.SafeDumper):
+        pass
+
+    def _represent_list(dumper, data):
+        # Lists of simple scalars (numbers, strings) → inline [0.8, 0.6, 2.5]
+        # Lists containing dicts or nested structures → block style
+        has_complex = any(isinstance(item, (dict, list)) for item in data)
+        return dumper.represent_sequence(
+            'tag:yaml.org,2002:seq', data,
+            flow_style=not has_complex)
+
+    ProjectDumper.add_representer(list, _represent_list)
+
+    return ProjectDumper
+
+
 class EditorWindow(QMainWindow):
     """Locul3D Editor — annotation editor for 3D point cloud scenes.
 
@@ -782,7 +800,8 @@ class EditorWindow(QMainWindow):
             data["reference_point"] = [round(float(v), 4) for v in self._ref_point]
         if HAS_YAML:
             with open(path, "w") as f:
-                yaml.dump(data, f, default_flow_style=None, sort_keys=False,
+                dumper = _make_project_dumper()
+                yaml.dump(data, f, Dumper=dumper, sort_keys=False,
                           allow_unicode=True)
         else:
             with open(path, "w") as f:
@@ -969,6 +988,7 @@ class EditorWindow(QMainWindow):
         """Open or raise the non-modal Scene Correction dialog."""
         # Reuse existing dialog if already open
         if hasattr(self, '_correction_dlg') and self._correction_dlg is not None:
+            self._correction_dlg.show()
             self._correction_dlg.raise_()
             self._correction_dlg.activateWindow()
             return
@@ -1001,11 +1021,18 @@ class EditorWindow(QMainWindow):
         self._correction_dlg = None
         self.gl_viewport.set_correction_diagnostics(None)
 
+    def closeEvent(self, event):
+        """Ensure background threads are stopped before window destruction."""
+        if hasattr(self, '_correction_dlg') and self._correction_dlg is not None:
+            self._correction_dlg.close()  # triggers its closeEvent → worker shutdown
+            self._correction_dlg = None
+        super().closeEvent(event)
+
     def _on_save_correction_to_project(self):
         """Save current state (including correction) to the project YAML."""
         if not self._yaml_path:
             # No YAML path yet — trigger Save As
-            self._on_save_as_yaml()
+            self._on_save_yaml_as()
         else:
             self._save_yaml(self._yaml_path)
             self.status_label.setText(
