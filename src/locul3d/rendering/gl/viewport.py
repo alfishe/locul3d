@@ -10,6 +10,15 @@ from PySide6.QtWidgets import QToolTip
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtGui import QSurfaceFormat
 
+# Disable PyOpenGL error checking BEFORE importing GL functions.
+# By default PyOpenGL calls glGetError() after every GL function,
+# forcing a GPU→CPU pipeline flush (~30-100µs each on Apple Silicon's
+# Metal translation layer).  With many draw calls this dominates
+# frame time.
+import OpenGL
+OpenGL.ERROR_CHECKING = False
+OpenGL.ERROR_LOGGING = False
+
 try:
     from OpenGL.GL import *
     from OpenGL.GLU import *
@@ -324,6 +333,20 @@ class BaseGLViewport(QOpenGLWidget):
         opaque = [l for l in visible if l.opacity >= 0.99]
         transparent = [l for l in visible if l.opacity < 0.99]
 
+        # Global interactive stride: cap total drawn points during
+        # mouse-drag so aggregate draw stays within budget.  Separate
+        # from the per-layer MAX_INTERACTIVE_PTS which handles single
+        # huge layers (e.g. 120M raw E57 scans).
+        INTERACTIVE_BUDGET = 5_000_000
+        if self._interacting:
+            total_vis = sum(l.point_count for l in visible
+                           if l.layer_type == "pointcloud")
+            self._global_interact_stride = (
+                max(1, total_vis // INTERACTIVE_BUDGET)
+                if total_vis > INTERACTIVE_BUDGET else 1)
+        else:
+            self._global_interact_stride = 1
+
         for layer in opaque + transparent:
             if layer.layer_type == "pointcloud":
                 self._draw_point_layer(layer)
@@ -463,6 +486,8 @@ class BaseGLViewport(QOpenGLWidget):
             stride = max(1, layer.point_count // MAX_OPACITY_PREVIEW_PTS)
         elif self._interacting and layer.point_count > MAX_INTERACTIVE_PTS:
             stride = max(1, layer.point_count // MAX_INTERACTIVE_PTS)
+        elif self._interacting:
+            stride = getattr(self, '_global_interact_stride', 1)
         else:
             stride = 1
 
@@ -506,7 +531,6 @@ class BaseGLViewport(QOpenGLWidget):
             glEnable(GL_DEPTH_TEST)
 
         glEnable(GL_LIGHTING)
-
 
     def _draw_mesh_layer(self, layer):
         """Render a triangle mesh layer with lighting (VBO path)."""
