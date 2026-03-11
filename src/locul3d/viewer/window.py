@@ -240,6 +240,12 @@ class ViewerWindow(QMainWindow):
             lambda c: self._toggle_view("fps_movement", c)
         )
         exp_menu.addAction(self.act_fps_movement)
+        self.act_fps_camera = QAction("FPS Camera", self, checkable=True)
+        self.act_fps_camera.setToolTip(
+            "First-person camera: mouselook + WASD walking (collapses orbit distance)"
+        )
+        self.act_fps_camera.triggered.connect(self._on_fps_camera_toggled)
+        exp_menu.addAction(self.act_fps_camera)
         exp_btn.setMenu(exp_menu)
         toolbar.addWidget(exp_btn)
 
@@ -483,6 +489,10 @@ class ViewerWindow(QMainWindow):
             l.evict_byte_caches()
             self.viewport.delete_vbos_for_layer(l.id)
         self.viewport.update()
+
+    def _on_fps_camera_toggled(self, checked):
+        self.viewport.set_fps_camera(checked)
+        self.act_fps_movement.setChecked(self.viewport.fps_movement)
 
     def _toggle_view(self, attr, checked):
         """Generic toggle for viewport boolean attributes (show_axes, show_grid, etc.)."""

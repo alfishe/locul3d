@@ -97,6 +97,11 @@ class BaseGLViewport(QOpenGLWidget):
         self.fps_movement = (
             False  # True = WASD/QE moves camera; False = scene correction
         )
+        self.fps_camera = False  # True = first-person camera (cam_distance=0)
+        self._saved_cam_distance = None  # orbital distance saved when entering FPS
+        self._fps_movement_was_manual = (
+            False  # track if user had fps_movement on before fps_camera
+        )
         self.bg_color = COLORS["gl_bg"]
 
         # Scene bounds (set after loading)
@@ -138,6 +143,9 @@ class BaseGLViewport(QOpenGLWidget):
         self._scene_radius = radius
         self.cam_target = center.copy()
         self.cam_distance = radius * 2.5
+        if self.fps_camera:
+            self._saved_cam_distance = self.cam_distance
+            self.cam_distance = 0.0
         self.cam_azimuth = 45.0
         self.cam_elevation = 30.0
 
@@ -166,6 +174,9 @@ class BaseGLViewport(QOpenGLWidget):
     def reset_camera(self):
         self.cam_target = self._scene_center.copy()
         self.cam_distance = self._scene_radius * 2.5
+        if self.fps_camera:
+            self._saved_cam_distance = self.cam_distance
+            self.cam_distance = 0.0
         self.cam_azimuth = 45.0
         self.cam_elevation = 30.0
         self.update()
@@ -173,6 +184,22 @@ class BaseGLViewport(QOpenGLWidget):
     def set_view(self, azimuth: float, elevation: float):
         self.cam_azimuth = azimuth
         self.cam_elevation = elevation
+        self.update()
+
+    def set_fps_camera(self, enabled: bool):
+        """Toggle between orbital and first-person camera mode."""
+        if enabled and not self.fps_camera:
+            self._saved_cam_distance = self.cam_distance
+            self._fps_movement_was_manual = self.fps_movement
+            self.cam_distance = 0.0
+            self.fps_movement = True
+            self.fps_camera = True
+        elif not enabled and self.fps_camera:
+            self.cam_distance = self._saved_cam_distance or self._scene_radius * 2.5
+            self._saved_cam_distance = None
+            if not self._fps_movement_was_manual:
+                self.fps_movement = False
+            self.fps_camera = False
         self.update()
 
     # --- GL Lifecycle ---
@@ -1075,7 +1102,7 @@ class BaseGLViewport(QOpenGLWidget):
             and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
         ):
             # Shift+Left drag = pan (same as middle mouse)
-            scale = self.cam_distance * 0.002
+            scale = max(self.cam_distance, self._scene_radius * 0.5) * 0.002
             az = math.radians(self.cam_azimuth)
             el = math.radians(self.cam_elevation)
             right = np.array([-math.sin(az), math.cos(az), 0.0])
@@ -1098,7 +1125,7 @@ class BaseGLViewport(QOpenGLWidget):
                 self.cam_elevation = max(-89, min(89, self.cam_elevation + dy * 0.3))
         elif self._mouse_btn == Qt.MouseButton.MiddleButton:
             # Middle drag = pan camera
-            scale = self.cam_distance * 0.002
+            scale = max(self.cam_distance, self._scene_radius * 0.5) * 0.002
             az = math.radians(self.cam_azimuth)
             el = math.radians(self.cam_elevation)
             right = np.array([-math.sin(az), math.cos(az), 0.0])
