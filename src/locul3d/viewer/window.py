@@ -6,15 +6,27 @@ from pathlib import Path
 
 try:
     import yaml
+
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
 
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QToolBar, QStatusBar,
-    QLabel, QSlider, QComboBox, QDockWidget, QFileDialog,
-    QApplication, QMessageBox,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QToolBar,
+    QStatusBar,
+    QLabel,
+    QSlider,
+    QComboBox,
+    QDockWidget,
+    QFileDialog,
+    QApplication,
+    QMessageBox,
+    QToolButton,
+    QMenu,
 )
 from PySide6.QtGui import QAction, QKeyEvent
 
@@ -75,12 +87,12 @@ class ViewerWindow(QMainWindow):
         # Apply CLI correction angles if provided
         if correction_angles:
             sc = self.viewport.scene_correction
-            sc.rotate_x = correction_angles.get('rotate_x', 0.0)
-            sc.rotate_y = correction_angles.get('rotate_y', 0.0)
-            sc.rotate_z = correction_angles.get('rotate_z', 0.0)
-            sc.shift_x = correction_angles.get('shift_x', 0.0)
-            sc.shift_y = correction_angles.get('shift_y', 0.0)
-            sc.shift_z = correction_angles.get('shift_z', 0.0)
+            sc.rotate_x = correction_angles.get("rotate_x", 0.0)
+            sc.rotate_y = correction_angles.get("rotate_y", 0.0)
+            sc.rotate_z = correction_angles.get("rotate_z", 0.0)
+            sc.shift_x = correction_angles.get("shift_x", 0.0)
+            sc.shift_y = correction_angles.get("shift_y", 0.0)
+            sc.shift_z = correction_angles.get("shift_z", 0.0)
         self._cli_correction = correction_angles or {}
 
         self._setup_ui()
@@ -100,11 +112,11 @@ class ViewerWindow(QMainWindow):
         self.layer_panel.pano_requested.connect(self._on_pano_requested)
 
         # Marker click in viewport → select in layer panel (no info panel)
-        self.viewport.marker_selected.connect(
-            self.layer_panel.select_layer_by_data)
+        self.viewport.marker_selected.connect(self.layer_panel.select_layer_by_data)
         # Marker double-click → select + open info panel
         self.viewport.marker_activated.connect(
-            lambda layer: self.layer_panel.select_layer_by_data(layer, notify=True))
+            lambda layer: self.layer_panel.select_layer_by_data(layer, notify=True)
+        )
 
         self._selected_layer = None
 
@@ -160,7 +172,9 @@ class ViewerWindow(QMainWindow):
         toolbar.addSeparator()
 
         # View toggles
-        self.act_layer_colors = QAction("Layer Colors", self, checkable=True, checked=True)
+        self.act_layer_colors = QAction(
+            "Layer Colors", self, checkable=True, checked=True
+        )
         self.act_layer_colors.triggered.connect(self._on_toggle_layer_colors)
         toolbar.addAction(self.act_layer_colors)
 
@@ -213,6 +227,22 @@ class ViewerWindow(QMainWindow):
         act_correction.triggered.connect(self._on_scene_correction)
         toolbar.addAction(act_correction)
 
+        toolbar.addSeparator()
+        exp_btn = QToolButton()
+        exp_btn.setText("Experimental")
+        exp_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        exp_menu = QMenu(self)
+        self.act_fps_movement = QAction("FPS Movement", self, checkable=True)
+        self.act_fps_movement.setToolTip(
+            "WASD/QE moves camera instead of scene correction"
+        )
+        self.act_fps_movement.triggered.connect(
+            lambda c: self._toggle_view("fps_movement", c)
+        )
+        exp_menu.addAction(self.act_fps_movement)
+        exp_btn.setMenu(exp_menu)
+        toolbar.addWidget(exp_btn)
+
     def _setup_sidebar(self):
         """Create right-side dock widgets: Layers panel and Info panel.
 
@@ -221,7 +251,8 @@ class ViewerWindow(QMainWindow):
         # Layers dock
         self._layers_dock = QDockWidget("Layers", self)
         self._layers_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._layers_dock.setMinimumWidth(280)
         self.layer_panel = LayerPanel(self.layer_manager)
         self._layers_dock.setWidget(self.layer_panel)
@@ -230,7 +261,8 @@ class ViewerWindow(QMainWindow):
         # Info dock
         self._info_dock = QDockWidget("Info", self)
         self._info_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._info_dock.setMinimumWidth(280)
         self.info_panel = InfoPanel()
         self._info_dock.setWidget(self.info_panel)
@@ -266,13 +298,13 @@ class ViewerWindow(QMainWindow):
         all other files via _load_file.  After loading, fits the camera,
         triggers _post_load, and auto-detects correction sidecars.
         """
-        files = getattr(self, '_deferred_files', [])
+        files = getattr(self, "_deferred_files", [])
         for arg in files:
             p = Path(arg)
             if p.is_dir():
                 self._load_folder(str(p))
             elif p.is_file():
-                if p.suffix.lower() == '.e57':
+                if p.suffix.lower() == ".e57":
                     self._import_e57_file(str(p))
                 else:
                     self._load_file(str(p), fit_camera=False)
@@ -290,10 +322,10 @@ class ViewerWindow(QMainWindow):
         the first opened file.
         """
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Files", "",
-            "3D Files (*.ply *.obj *.stl *.e57);;All Files (*)")
+            self, "Open Files", "", "3D Files (*.ply *.obj *.stl *.e57);;All Files (*)"
+        )
         for p in paths:
-            if Path(p).suffix.lower() == '.e57':
+            if Path(p).suffix.lower() == ".e57":
                 self._import_e57_file(p)
             else:
                 self._load_file(p)
@@ -310,8 +342,8 @@ class ViewerWindow(QMainWindow):
     def _on_import_e57(self):
         """Show file dialog specifically for E57 import with full pipeline."""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import E57 File", "",
-            "E57 Files (*.e57);;All Files (*)")
+            self, "Import E57 File", "", "E57 Files (*.e57);;All Files (*)"
+        )
         if path:
             self._import_e57_file(path)
 
@@ -323,18 +355,24 @@ class ViewerWindow(QMainWindow):
         """
         try:
             from ..plugins.importers.e57 import (
-                E57ImportWorker, E57ProgressDialog, E57Importer,
+                E57ImportWorker,
+                E57ProgressDialog,
+                E57Importer,
             )
         except ImportError as e:
-            QMessageBox.warning(self, "E57 Import",
-                                f"E57 import dependencies not available:\n{e}")
+            QMessageBox.warning(
+                self, "E57 Import", f"E57 import dependencies not available:\n{e}"
+            )
             return
 
         importer = E57Importer()
         if not importer.is_available():
-            QMessageBox.warning(self, "E57 Import",
-                                "E57 import requires pye57 and open3d.\n"
-                                "Install: pip install pye57 open3d")
+            QMessageBox.warning(
+                self,
+                "E57 Import",
+                "E57 import requires pye57 and open3d.\n"
+                "Install: pip install pye57 open3d",
+            )
             return
 
         worker = importer.create_worker(path, self)
@@ -344,7 +382,6 @@ class ViewerWindow(QMainWindow):
 
         result = dialog.get_result()
         if result and result.layers:
-
             for layer in result.layers:
                 self.layer_manager.layers.append(layer)
             self.layer_panel.rebuild()
@@ -357,7 +394,8 @@ class ViewerWindow(QMainWindow):
             n_layers = len(result.layers)
             total_pts = sum(l.point_count for l in result.layers)
             self.status_label.setText(
-                f"Imported E57: {n_layers} layers, {total_pts:,} points")
+                f"Imported E57: {n_layers} layers, {total_pts:,} points"
+            )
             self.setWindowTitle(f"Locul3D Viewer — {Path(path).name}")
             self._post_load()
 
@@ -463,7 +501,12 @@ class ViewerWindow(QMainWindow):
         "Perspective" entry in the combo is a no-op (default orbital view).
         """
         vp = self.viewport
-        presets = {"Top": (0, 89), "Front": (0, 0), "Right": (90, 0), "Isometric": (45, 30)}
+        presets = {
+            "Top": (0, 89),
+            "Front": (0, 0),
+            "Right": (90, 0),
+            "Isometric": (45, 30),
+        }
         if name in presets:
             vp.cam_azimuth, vp.cam_elevation = presets[name]
             vp.update()
@@ -475,8 +518,11 @@ class ViewerWindow(QMainWindow):
         Supported formats depend on Qt image plugins (PNG, JPG, BMP).
         """
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Screenshot", "screenshot.png",
-            "Images (*.png *.jpg *.bmp);;All Files (*)")
+            self,
+            "Save Screenshot",
+            "screenshot.png",
+            "Images (*.png *.jpg *.bmp);;All Files (*)",
+        )
         if path:
             pixmap = self.viewport.grab()
             pixmap.save(path)
@@ -494,11 +540,12 @@ class ViewerWindow(QMainWindow):
         self.viewport.scene_clip = (x0, x1, y0, y1, z0, z1)
         self.viewport.update()
         self.status_label.setText(
-            f"Scene clip: X=[{x0:.1f},{x1:.1f}] Y=[{y0:.1f},{y1:.1f}] Z=[{z0:.1f},{z1:.1f}]")
+            f"Scene clip: X=[{x0:.1f},{x1:.1f}] Y=[{y0:.1f},{y1:.1f}] Z=[{z0:.1f},{z1:.1f}]"
+        )
 
     def _on_scene_correction(self):
         """Open or raise the non-modal Scene Correction dialog."""
-        if hasattr(self, '_correction_dlg') and self._correction_dlg is not None:
+        if hasattr(self, "_correction_dlg") and self._correction_dlg is not None:
             self._correction_dlg.raise_()
             self._correction_dlg.activateWindow()
             return
@@ -507,11 +554,13 @@ class ViewerWindow(QMainWindow):
         corr = self.viewport.scene_correction or SceneCorrection()
 
         dlg = CorrectionDialog(
-            corr, scene_dir, parent=self,
+            corr,
+            scene_dir,
+            parent=self,
             point_source=self._collect_all_points,
         )
         dlg.correction_changed.connect(self._apply_correction)
-        dlg.destroyed.connect(lambda: setattr(self, '_correction_dlg', None))
+        dlg.destroyed.connect(lambda: setattr(self, "_correction_dlg", None))
         self._correction_dlg = dlg
         dlg.show()
 
@@ -522,18 +571,20 @@ class ViewerWindow(QMainWindow):
         if not c.is_identity:
             self.status_label.setText(
                 f"Correction: rot=({c.rotate_x:.1f}, {c.rotate_y:.1f}, {c.rotate_z:.1f})°  "
-                f"shift=({c.shift_x:.2f}, {c.shift_y:.2f}, {c.shift_z:.2f})")
+                f"shift=({c.shift_x:.2f}, {c.shift_y:.2f}, {c.shift_z:.2f})"
+            )
         else:
             self.status_label.setText("Correction reset")
 
     def _collect_all_points(self):
         """Collect all visible point cloud data for auto-detection."""
         import numpy as np
+
         all_pts = []
         for layer in self.layer_manager.layers:
             if not layer.visible:
                 continue
-            if hasattr(layer, 'points') and layer.points is not None:
+            if hasattr(layer, "points") and layer.points is not None:
                 all_pts.append(np.asarray(layer.points, dtype=np.float64))
         if not all_pts:
             return None
@@ -569,18 +620,26 @@ class ViewerWindow(QMainWindow):
                             shift_z=float(c_data.get("shift_z", 0)),
                         )
                         cli = self._cli_correction
-                        if cli.get('rotate_x', 0): c.rotate_x = cli['rotate_x']
-                        if cli.get('rotate_y', 0): c.rotate_y = cli['rotate_y']
-                        if cli.get('rotate_z', 0): c.rotate_z = cli['rotate_z']
-                        if cli.get('shift_x', 0): c.shift_x = cli['shift_x']
-                        if cli.get('shift_y', 0): c.shift_y = cli['shift_y']
-                        if cli.get('shift_z', 0): c.shift_z = cli['shift_z']
+                        if cli.get("rotate_x", 0):
+                            c.rotate_x = cli["rotate_x"]
+                        if cli.get("rotate_y", 0):
+                            c.rotate_y = cli["rotate_y"]
+                        if cli.get("rotate_z", 0):
+                            c.rotate_z = cli["rotate_z"]
+                        if cli.get("shift_x", 0):
+                            c.shift_x = cli["shift_x"]
+                        if cli.get("shift_y", 0):
+                            c.shift_y = cli["shift_y"]
+                        if cli.get("shift_z", 0):
+                            c.shift_z = cli["shift_z"]
                         self.viewport.scene_correction = c
                         self.viewport.update()
                         print(f"Correction loaded from project: {candidate.name}")
                         self.status_label.setText(f"Project loaded: {candidate.name}")
                 except Exception as e:
-                    print(f"Warning: failed to parse project file {candidate.name}: {e}")
+                    print(
+                        f"Warning: failed to parse project file {candidate.name}: {e}"
+                    )
                 return
         print(f"  No project file found for: {p.name}")
 
@@ -610,7 +669,8 @@ class ViewerWindow(QMainWindow):
         """
         vp = self.viewport
         self.cam_label.setText(
-            f"Az:{vp.cam_azimuth%360:.0f} El:{vp.cam_elevation:.0f} D:{vp.cam_distance:.1f}")
+            f"Az:{vp.cam_azimuth % 360:.0f} El:{vp.cam_elevation:.0f} D:{vp.cam_distance:.1f}"
+        )
         self.fps_label.setText(f"FPS: {fps:.0f}")
 
     def _check_file_changes(self):
@@ -640,9 +700,11 @@ class ViewerWindow(QMainWindow):
         """
         key = event.key()
         if key == Qt.Key.Key_Escape:
-            if (hasattr(self.viewport, '_panorama')
-                    and self.viewport._panorama
-                    and self.viewport._panorama.is_active):
+            if (
+                hasattr(self.viewport, "_panorama")
+                and self.viewport._panorama
+                and self.viewport._panorama.is_active
+            ):
                 self.viewport.exit_panorama()
                 self.layer_panel.highlight_active_pano(None)
                 return

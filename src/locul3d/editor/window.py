@@ -9,9 +9,19 @@ from typing import Optional, List
 import numpy as np
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QToolBar, QStatusBar,
-    QLabel, QSlider, QComboBox, QDockWidget, QFileDialog,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QToolBar,
+    QStatusBar,
+    QLabel,
+    QSlider,
+    QComboBox,
+    QDockWidget,
+    QFileDialog,
     QApplication,
+    QToolButton,
+    QMenu,
 )
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QAction, QKeyEvent
@@ -19,8 +29,14 @@ from PySide6.QtGui import QAction, QKeyEvent
 from ..core.layer import LayerManager, LayerData
 from ..core.geometry import BBoxItem, PlaneItem
 from ..core.constants import (
-    COLORS, BBOX_COLORS, PLANE_COLORS, DEFAULT_SIZES,
-    TOOL_SELECT, TOOL_MOVE, TOOL_ROTATE, TOOL_SCALE,
+    COLORS,
+    BBOX_COLORS,
+    PLANE_COLORS,
+    DEFAULT_SIZES,
+    TOOL_SELECT,
+    TOOL_MOVE,
+    TOOL_ROTATE,
+    TOOL_SCALE,
     AXIS_NAMES,
 )
 from ..core.correction import SceneCorrection
@@ -37,6 +53,7 @@ from .viewport import EditorViewport
 
 try:
     import yaml
+
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
@@ -44,6 +61,7 @@ except ImportError:
 
 def _make_project_dumper():
     """YAML dumper: dicts block-style, scalar lists inline, dict lists block."""
+
     class ProjectDumper(yaml.SafeDumper):
         pass
 
@@ -52,8 +70,8 @@ def _make_project_dumper():
         # Lists containing dicts or nested structures → block style
         has_complex = any(isinstance(item, (dict, list)) for item in data)
         return dumper.represent_sequence(
-            'tag:yaml.org,2002:seq', data,
-            flow_style=not has_complex)
+            "tag:yaml.org,2002:seq", data, flow_style=not has_complex
+        )
 
     ProjectDumper.add_representer(list, _represent_list)
 
@@ -84,7 +102,9 @@ class EditorWindow(QMainWindow):
         4. File-watch timer polls every 2s for on-disk changes (hot reload)
     """
 
-    def __init__(self, files=None, annotations_path=None, correction_angles=None, parent=None):
+    def __init__(
+        self, files=None, annotations_path=None, correction_angles=None, parent=None
+    ):
         """Initialise the Editor window.
 
         Args:
@@ -123,12 +143,12 @@ class EditorWindow(QMainWindow):
         # Apply CLI correction angles if provided
         if correction_angles:
             sc = self.gl_viewport.scene_correction
-            sc.rotate_x = correction_angles.get('rotate_x', 0.0)
-            sc.rotate_y = correction_angles.get('rotate_y', 0.0)
-            sc.rotate_z = correction_angles.get('rotate_z', 0.0)
-            sc.shift_x = correction_angles.get('shift_x', 0.0)
-            sc.shift_y = correction_angles.get('shift_y', 0.0)
-            sc.shift_z = correction_angles.get('shift_z', 0.0)
+            sc.rotate_x = correction_angles.get("rotate_x", 0.0)
+            sc.rotate_y = correction_angles.get("rotate_y", 0.0)
+            sc.rotate_z = correction_angles.get("rotate_z", 0.0)
+            sc.shift_x = correction_angles.get("shift_x", 0.0)
+            sc.shift_y = correction_angles.get("shift_y", 0.0)
+            sc.shift_z = correction_angles.get("shift_z", 0.0)
         self._cli_correction = correction_angles or {}
 
         self._setup_ui()
@@ -145,8 +165,7 @@ class EditorWindow(QMainWindow):
         self.gl_viewport.fps_updated.connect(self._on_fps_updated)
         self.layer_panel.layer_changed.connect(self._on_layer_changed)
         self.layer_panel.layer_selected.connect(self._on_layer_selected)
-        self.layer_panel.opacity_adjusting.connect(
-            self._on_opacity_adjusting)
+        self.layer_panel.opacity_adjusting.connect(self._on_opacity_adjusting)
         self.layer_panel.pano_requested.connect(self._on_pano_requested)
 
         self.gl_viewport.point_picked.connect(self._on_point_picked)
@@ -155,11 +174,11 @@ class EditorWindow(QMainWindow):
         self.gl_viewport.transform_committed.connect(self._on_transform_committed)
 
         # Marker click in viewport → select in layer panel (no info panel)
-        self.gl_viewport.marker_selected.connect(
-            self.layer_panel.select_layer_by_data)
+        self.gl_viewport.marker_selected.connect(self.layer_panel.select_layer_by_data)
         # Marker double-click → select + open info panel
         self.gl_viewport.marker_activated.connect(
-            lambda layer: self.layer_panel.select_layer_by_data(layer, notify=True))
+            lambda layer: self.layer_panel.select_layer_by_data(layer, notify=True)
+        )
 
         self.bbox_panel.bbox_changed.connect(self._on_bbox_panel_changed)
         self.bbox_panel.selection_changed.connect(self._on_bbox_panel_selection)
@@ -249,7 +268,9 @@ class EditorWindow(QMainWindow):
         toolbar.addSeparator()
 
         # View toggles
-        self.act_layer_colors = QAction("Layer Colors", self, checkable=True, checked=True)
+        self.act_layer_colors = QAction(
+            "Layer Colors", self, checkable=True, checked=True
+        )
         self.act_layer_colors.triggered.connect(self._on_toggle_layer_colors)
         toolbar.addAction(self.act_layer_colors)
 
@@ -287,7 +308,9 @@ class EditorWindow(QMainWindow):
 
         act_reset = QAction("Reset View", self)
         act_reset.setShortcut("Home")
-        act_reset.setToolTip("Fit view to selected bbox (or scene) with current projection")
+        act_reset.setToolTip(
+            "Fit view to selected bbox (or scene) with current projection"
+        )
         act_reset.triggered.connect(self._on_reset_view)
         toolbar.addAction(act_reset)
 
@@ -295,14 +318,14 @@ class EditorWindow(QMainWindow):
 
         self.act_ref_panel = QAction("Ref/Coords", self, checkable=True)
         self.act_ref_panel.setToolTip("Toggle Reference & Coordinates panel")
-        self.act_ref_panel.triggered.connect(
-            lambda c: self._ref_dock.setVisible(c))
+        self.act_ref_panel.triggered.connect(lambda c: self._ref_dock.setVisible(c))
         toolbar.addAction(self.act_ref_panel)
 
         act_ground = QAction("Ground Z=0", self, checkable=True)
         act_ground.setToolTip("Show global reference plane at Z=0 (cyan wireframe)")
         act_ground.triggered.connect(
-            lambda c: self._toggle_view('show_ground_plane', c))
+            lambda c: self._toggle_view("show_ground_plane", c)
+        )
         toolbar.addAction(act_ground)
 
         act_scene = QAction("Scene", self)
@@ -315,6 +338,22 @@ class EditorWindow(QMainWindow):
         act_correction.triggered.connect(self._on_scene_correction)
         toolbar.addAction(act_correction)
 
+        toolbar.addSeparator()
+        exp_btn = QToolButton()
+        exp_btn.setText("Experimental")
+        exp_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        exp_menu = QMenu(self)
+        self.act_fps_movement = QAction("FPS Movement", self, checkable=True)
+        self.act_fps_movement.setToolTip(
+            "WASD/QE moves camera instead of scene correction"
+        )
+        self.act_fps_movement.triggered.connect(
+            lambda c: self._toggle_view("fps_movement", c)
+        )
+        exp_menu.addAction(self.act_fps_movement)
+        exp_btn.setMenu(exp_menu)
+        toolbar.addWidget(exp_btn)
+
     def _setup_sidebar(self):
         """Create dock widgets: Layers, BBox, Planes, Info, Reference.
 
@@ -324,7 +363,8 @@ class EditorWindow(QMainWindow):
         # Layers dock
         self._layers_dock = QDockWidget("Layers", self)
         self._layers_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._layers_dock.setMinimumWidth(280)
         self.layer_panel = LayerPanel(self.layer_manager)
         self._layers_dock.setWidget(self.layer_panel)
@@ -333,7 +373,8 @@ class EditorWindow(QMainWindow):
         # BBox dock
         self._bbox_dock = QDockWidget("BBox Annotations", self)
         self._bbox_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._bbox_dock.setMinimumWidth(320)
         self.bbox_panel = BBoxPanel(self.annotations)
         self._bbox_dock.setWidget(self.bbox_panel)
@@ -342,7 +383,8 @@ class EditorWindow(QMainWindow):
         # Planes dock
         self._planes_dock = QDockWidget("Surface Planes", self)
         self._planes_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._planes_dock.setMinimumWidth(300)
         self.plane_panel = PlanePanel(self.planes)
         self._planes_dock.setWidget(self.plane_panel)
@@ -351,7 +393,8 @@ class EditorWindow(QMainWindow):
         # Info dock
         self._info_dock = QDockWidget("Info", self)
         self._info_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._info_dock.setMinimumWidth(280)
         self.info_panel = InfoPanel()
         self._info_dock.setWidget(self.info_panel)
@@ -360,7 +403,8 @@ class EditorWindow(QMainWindow):
         # Reference & Coordinates dock (floating by default)
         self._ref_dock = QDockWidget("Reference & Coordinates", self)
         self._ref_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._ref_dock.setMinimumWidth(240)
         self.ref_panel = ReferencePanel()
         self._ref_dock.setWidget(self.ref_panel)
@@ -369,7 +413,8 @@ class EditorWindow(QMainWindow):
         self._ref_dock.resize(260, 300)
         self._ref_dock.hide()  # hidden by default
         self._ref_dock.visibilityChanged.connect(
-            lambda vis: self.act_ref_panel.setChecked(vis))
+            lambda vis: self.act_ref_panel.setChecked(vis)
+        )
 
         # Tabify docks on the right
         self.tabifyDockWidget(self._layers_dock, self._bbox_dock)
@@ -398,7 +443,7 @@ class EditorWindow(QMainWindow):
         In 'corners' mode, scale handles anchor the opposite face.
         In 'center' mode, scaling is symmetric around center.
         """
-        self.gl_viewport.scale_from_corner = (mode == "corners")
+        self.gl_viewport.scale_from_corner = mode == "corners"
 
     def _set_tool(self, tool):
         """Switch the active gizmo tool (select/move/rotate/scale).
@@ -442,14 +487,14 @@ class EditorWindow(QMainWindow):
 
     def _deferred_load(self):
         """Load files passed via constructor after the event loop starts."""
-        files = getattr(self, '_deferred_files', [])
-        yaml_path = getattr(self, '_deferred_yaml', None)
+        files = getattr(self, "_deferred_files", [])
+        yaml_path = getattr(self, "_deferred_yaml", None)
         for arg in files:
             p = Path(arg)
             if p.is_dir():
                 self._load_folder(str(p))
             elif p.is_file():
-                if p.suffix.lower() == '.e57':
+                if p.suffix.lower() == ".e57":
                     self._import_e57_file(str(p))
                 else:
                     self._load_file(str(p), fit_camera=False)
@@ -466,10 +511,10 @@ class EditorWindow(QMainWindow):
         Auto-detects correction sidecar for the first opened file.
         """
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Files", "",
-            "3D Files (*.ply *.obj *.stl *.e57);;All Files (*)")
+            self, "Open Files", "", "3D Files (*.ply *.obj *.stl *.e57);;All Files (*)"
+        )
         for p in paths:
-            if Path(p).suffix.lower() == '.e57':
+            if Path(p).suffix.lower() == ".e57":
                 self._import_e57_file(p)
             else:
                 self._load_file(p)
@@ -492,7 +537,9 @@ class EditorWindow(QMainWindow):
         # --- E57 import ---
         try:
             from ..plugins.importers.e57 import (
-                E57ImportWorker, E57ProgressDialog, E57Importer,
+                E57ImportWorker,
+                E57ProgressDialog,
+                E57Importer,
             )
         except ImportError as e:
             self.status_label.setText(f"E57 import not available: {e}")
@@ -512,7 +559,6 @@ class EditorWindow(QMainWindow):
 
         result = dialog.get_result()
         if result and result.layers:
-
             for layer in result.layers:
                 self.layer_manager.layers.append(layer)
             self.layer_panel.rebuild()
@@ -522,7 +568,8 @@ class EditorWindow(QMainWindow):
             n_layers = len(result.layers)
             total_pts = sum(l.point_count for l in result.layers)
             self.status_label.setText(
-                f"Imported E57: {n_layers} layers, {total_pts:,} points")
+                f"Imported E57: {n_layers} layers, {total_pts:,} points"
+            )
             self._post_load()
 
     def _load_file(self, path: str, fit_camera: bool = True):
@@ -601,13 +648,15 @@ class EditorWindow(QMainWindow):
         self._color_idx += 1
         bbox = BBoxItem(label=label, center=center, size=size, color=color)
         self.annotations.append(bbox)
-        self._push_undo('create', {'idx': len(self.annotations) - 1})
+        self._push_undo("create", {"idx": len(self.annotations) - 1})
         self.bbox_panel.rebuild_list()
         idx = len(self.annotations) - 1
         self.bbox_panel.select_bbox(idx)
         self.gl_viewport.selected_idx = idx
         self.gl_viewport.update()
-        self.status_label.setText(f"Created [{idx}] {label} at ({x:.2f}, {y:.2f}, {z:.2f})")
+        self.status_label.setText(
+            f"Created [{idx}] {label} at ({x:.2f}, {y:.2f}, {z:.2f})"
+        )
 
     def _create_bbox_at_target(self):
         """Create a new BBox at the camera target point (keyboard shortcut N)."""
@@ -618,8 +667,9 @@ class EditorWindow(QMainWindow):
         """Delete a BBox annotation by index, pushing the action to the undo stack."""
         if idx < 0 or idx >= len(self.annotations):
             return
-        self._push_undo('delete', {
-            'idx': idx, 'bbox': copy.deepcopy(self.annotations[idx])})
+        self._push_undo(
+            "delete", {"idx": idx, "bbox": copy.deepcopy(self.annotations[idx])}
+        )
         self.annotations.pop(idx)
         self.gl_viewport.selected_idx = -1
         self.bbox_panel.rebuild_list()
@@ -636,19 +686,19 @@ class EditorWindow(QMainWindow):
         if action is None:
             return
         act_type, data = action
-        if act_type == 'create':
-            idx = data['idx']
+        if act_type == "create":
+            idx = data["idx"]
             if idx < len(self.annotations):
                 self.annotations.pop(idx)
-        elif act_type == 'delete':
-            self.annotations.insert(data['idx'], data['bbox'])
-        elif act_type == 'transform':
-            idx = data['idx']
+        elif act_type == "delete":
+            self.annotations.insert(data["idx"], data["bbox"])
+        elif act_type == "transform":
+            idx = data["idx"]
             if idx < len(self.annotations):
                 b = self.annotations[idx]
-                b.center_pos = data['center']
-                b.size = data['size']
-                b.rotation_z = data['rotation_z']
+                b.center_pos = data["center"]
+                b.size = data["size"]
+                b.rotation_z = data["rotation_z"]
         self.gl_viewport.selected_idx = -1
         self.bbox_panel.rebuild_list()
         self.bbox_panel.select_bbox(-1)
@@ -667,12 +717,15 @@ class EditorWindow(QMainWindow):
 
     def _on_transform_committed(self, idx, snapshot):
         """Called before a gizmo drag starts — push pre-drag state for undo."""
-        self._push_undo('transform', {
-            'idx': idx,
-            'center': snapshot['center'],
-            'size': snapshot['size'],
-            'rotation_z': snapshot['rotation_z'],
-        })
+        self._push_undo(
+            "transform",
+            {
+                "idx": idx,
+                "center": snapshot["center"],
+                "size": snapshot["size"],
+                "rotation_z": snapshot["rotation_z"],
+            },
+        )
 
     # ------------------------------------------------------------------
     # Plane operations
@@ -691,8 +744,13 @@ class EditorWindow(QMainWindow):
         sc = self.gl_viewport.scene_correction
         center = sc.transform_point([float(t[0]), float(t[1]), 0.0])
         center[2] = 0.0  # keep Z=0 for floor-level reference
-        plane = PlaneItem(axis='xy', center=center.tolist(),
-                          size=[5.0, 5.0], color=color, opacity=0.25)
+        plane = PlaneItem(
+            axis="xy",
+            center=center.tolist(),
+            size=[5.0, 5.0],
+            color=color,
+            opacity=0.25,
+        )
         self.planes.append(plane)
         self.plane_panel.rebuild_list()
         idx = len(self.planes) - 1
@@ -801,16 +859,18 @@ class EditorWindow(QMainWindow):
         if HAS_YAML:
             with open(path, "w") as f:
                 dumper = _make_project_dumper()
-                yaml.dump(data, f, Dumper=dumper, sort_keys=False,
-                          allow_unicode=True)
+                yaml.dump(data, f, Dumper=dumper, sort_keys=False, allow_unicode=True)
         else:
             with open(path, "w") as f:
                 json.dump(data, f, indent=2)
         self._yaml_path = path
         parts = []
-        if self.annotations: parts.append(f"{len(self.annotations)} bboxes")
-        if self.planes: parts.append(f"{len(self.planes)} planes")
-        if corr and not corr.is_identity: parts.append("correction")
+        if self.annotations:
+            parts.append(f"{len(self.annotations)} bboxes")
+        if self.planes:
+            parts.append(f"{len(self.planes)} planes")
+        if corr and not corr.is_identity:
+            parts.append("correction")
         summary = ", ".join(parts) if parts else "empty"
         self.status_label.setText(f"Saved {summary} to {Path(path).name}")
         self.setWindowTitle(f"Locul3D Editor — {Path(path).name}")
@@ -857,12 +917,18 @@ class EditorWindow(QMainWindow):
             )
             # CLI overrides
             cli = self._cli_correction
-            if cli.get('rotate_x', 0): corr.rotate_x = cli['rotate_x']
-            if cli.get('rotate_y', 0): corr.rotate_y = cli['rotate_y']
-            if cli.get('rotate_z', 0): corr.rotate_z = cli['rotate_z']
-            if cli.get('shift_x', 0): corr.shift_x = cli['shift_x']
-            if cli.get('shift_y', 0): corr.shift_y = cli['shift_y']
-            if cli.get('shift_z', 0): corr.shift_z = cli['shift_z']
+            if cli.get("rotate_x", 0):
+                corr.rotate_x = cli["rotate_x"]
+            if cli.get("rotate_y", 0):
+                corr.rotate_y = cli["rotate_y"]
+            if cli.get("rotate_z", 0):
+                corr.rotate_z = cli["rotate_z"]
+            if cli.get("shift_x", 0):
+                corr.shift_x = cli["shift_x"]
+            if cli.get("shift_y", 0):
+                corr.shift_y = cli["shift_y"]
+            if cli.get("shift_z", 0):
+                corr.shift_z = cli["shift_z"]
             self.gl_viewport.scene_correction = corr
             self.gl_viewport.update()
         # --- UI update ---
@@ -875,9 +941,12 @@ class EditorWindow(QMainWindow):
         n_plane = len(self.planes)
         has_corr = "correction" in data
         parts = []
-        if n_bbox: parts.append(f"{n_bbox} bboxes")
-        if n_plane: parts.append(f"{n_plane} planes")
-        if has_corr: parts.append("correction")
+        if n_bbox:
+            parts.append(f"{n_bbox} bboxes")
+        if n_plane:
+            parts.append(f"{n_plane} planes")
+        if has_corr:
+            parts.append("correction")
         summary = ", ".join(parts) if parts else "empty"
         self.status_label.setText(f"Loaded {summary} from {Path(path).name}")
         self.setWindowTitle(f"Locul3D Editor — {Path(path).name}")
@@ -892,14 +961,18 @@ class EditorWindow(QMainWindow):
     def _on_save_yaml_as(self):
         """Prompt for a new file path and save annotations."""
         ext = "YAML (*.yaml *.yml)" if HAS_YAML else "JSON (*.json)"
-        path, _ = QFileDialog.getSaveFileName(self, "Save Annotations", "", f"{ext};;All Files (*)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Annotations", "", f"{ext};;All Files (*)"
+        )
         if path:
             self._save_yaml(path)
 
     def _on_load_yaml(self):
         """Prompt for a YAML/JSON file and load annotations from it."""
         ext = "YAML/JSON (*.yaml *.yml *.json)" if HAS_YAML else "JSON (*.json)"
-        path, _ = QFileDialog.getOpenFileName(self, "Load Annotations", "", f"{ext};;All Files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Annotations", "", f"{ext};;All Files (*)"
+        )
         if path:
             self._load_yaml(path)
 
@@ -914,7 +987,7 @@ class EditorWindow(QMainWindow):
         Otherwise creates a new BBox at the picked position.
         """
         # Route to ref-point handler if in picking mode
-        if getattr(self.gl_viewport, '_picking_ref_point', False):
+        if getattr(self.gl_viewport, "_picking_ref_point", False):
             self.gl_viewport._picking_ref_point = False
             self._on_ref_point_picked(x, y, z)
             return
@@ -982,12 +1055,13 @@ class EditorWindow(QMainWindow):
         self.gl_viewport.scene_clip = (x0, x1, y0, y1, z0, z1)
         self.gl_viewport.update()
         self.status_label.setText(
-            f"Scene clip: X=[{x0:.1f},{x1:.1f}] Y=[{y0:.1f},{y1:.1f}] Z=[{z0:.1f},{z1:.1f}]")
+            f"Scene clip: X=[{x0:.1f},{x1:.1f}] Y=[{y0:.1f},{y1:.1f}] Z=[{z0:.1f},{z1:.1f}]"
+        )
 
     def _on_scene_correction(self):
         """Open or raise the non-modal Scene Correction dialog."""
         # Reuse existing dialog if already open
-        if hasattr(self, '_correction_dlg') and self._correction_dlg is not None:
+        if hasattr(self, "_correction_dlg") and self._correction_dlg is not None:
             self._correction_dlg.show()
             self._correction_dlg.raise_()
             self._correction_dlg.activateWindow()
@@ -997,7 +1071,9 @@ class EditorWindow(QMainWindow):
         corr = self.gl_viewport.scene_correction or SceneCorrection()
 
         dlg = CorrectionDialog(
-            corr, scene_dir, parent=self,
+            corr,
+            scene_dir,
+            parent=self,
             point_source=self._collect_all_points,
         )
         dlg.correction_changed.connect(self._apply_correction)
@@ -1023,7 +1099,7 @@ class EditorWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Ensure background threads are stopped before window destruction."""
-        if hasattr(self, '_correction_dlg') and self._correction_dlg is not None:
+        if hasattr(self, "_correction_dlg") and self._correction_dlg is not None:
             self._correction_dlg.close()  # triggers its closeEvent → worker shutdown
             self._correction_dlg = None
         super().closeEvent(event)
@@ -1036,16 +1112,18 @@ class EditorWindow(QMainWindow):
         else:
             self._save_yaml(self._yaml_path)
             self.status_label.setText(
-                f"Correction saved to {Path(self._yaml_path).name}")
+                f"Correction saved to {Path(self._yaml_path).name}"
+            )
 
     def _collect_all_points(self):
         """Collect all visible point cloud data for auto-detection."""
         import numpy as np
+
         all_pts = []
         for layer in self.layer_manager.layers:
             if not layer.visible:
                 continue
-            if hasattr(layer, 'points') and layer.points is not None:
+            if hasattr(layer, "points") and layer.points is not None:
                 all_pts.append(np.asarray(layer.points, dtype=np.float64))
         if not all_pts:
             return None
@@ -1093,7 +1171,12 @@ class EditorWindow(QMainWindow):
     def _on_camera_preset(self, name):
         """Set camera to a named preset (Top/Front/Right/Isometric). Distance unchanged."""
         vp = self.gl_viewport
-        presets = {"Top": (0, 89), "Front": (0, 0), "Right": (90, 0), "Isometric": (45, 30)}
+        presets = {
+            "Top": (0, 89),
+            "Front": (0, 0),
+            "Right": (90, 0),
+            "Isometric": (45, 30),
+        }
         if name in presets:
             vp.cam_azimuth, vp.cam_elevation = presets[name]
             vp.update()
@@ -1117,7 +1200,8 @@ class EditorWindow(QMainWindow):
         """Update status bar with camera azimuth/elevation/distance and FPS."""
         vp = self.gl_viewport
         self.cam_label.setText(
-            f"Az:{vp.cam_azimuth%360:.0f} El:{vp.cam_elevation:.0f} D:{vp.cam_distance:.1f}")
+            f"Az:{vp.cam_azimuth % 360:.0f} El:{vp.cam_elevation:.0f} D:{vp.cam_distance:.1f}"
+        )
         self.fps_label.setText(f"FPS: {fps:.0f}")
 
     def _check_file_changes(self):
@@ -1155,9 +1239,16 @@ class EditorWindow(QMainWindow):
 
         # Scene correction keys: WASD+QE+arrows → route to viewport first
         _CORRECTION_KEYS = {
-            Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D,
-            Qt.Key.Key_Q, Qt.Key.Key_E,
-            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
+            Qt.Key.Key_W,
+            Qt.Key.Key_A,
+            Qt.Key.Key_S,
+            Qt.Key.Key_D,
+            Qt.Key.Key_Q,
+            Qt.Key.Key_E,
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
         }
         if key in _CORRECTION_KEYS:
             self.gl_viewport.keyPressEvent(event)
@@ -1165,9 +1256,11 @@ class EditorWindow(QMainWindow):
 
         if key == Qt.Key.Key_Escape:
             # Exit panorama mode first if active
-            if (hasattr(self.gl_viewport, '_panorama')
-                    and self.gl_viewport._panorama
-                    and self.gl_viewport._panorama.is_active):
+            if (
+                hasattr(self.gl_viewport, "_panorama")
+                and self.gl_viewport._panorama
+                and self.gl_viewport._panorama.is_active
+            ):
                 self.gl_viewport.exit_panorama()
                 self.layer_panel.highlight_active_pano(None)
                 return

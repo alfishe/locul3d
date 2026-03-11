@@ -16,13 +16,28 @@ from PySide6.QtGui import QSurfaceFormat
 # Metal translation layer).  With many draw calls this dominates
 # frame time.
 import OpenGL
+
 OpenGL.ERROR_CHECKING = False
 OpenGL.ERROR_LOGGING = False
+
+from OpenGL import contextdata
+
+contextdata.getContext = lambda *args: 1
 
 try:
     from OpenGL.GL import *
     from OpenGL.GLU import *
-    from OpenGL.GL import shaders, GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER, GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_NORMAL_ARRAY, GL_STATIC_DRAW, GL_LIGHTING
+    from OpenGL.GL import (
+        shaders,
+        GL_ARRAY_BUFFER,
+        GL_ELEMENT_ARRAY_BUFFER,
+        GL_VERTEX_ARRAY,
+        GL_COLOR_ARRAY,
+        GL_NORMAL_ARRAY,
+        GL_STATIC_DRAW,
+        GL_LIGHTING,
+    )
+
     HAS_OPENGL = True
 except ImportError:
     HAS_OPENGL = False
@@ -33,6 +48,7 @@ from locul3d.core.correction import SceneCorrection
 
 try:
     from locul3d.rendering.panorama import PanoramaManager
+
     HAS_PANORAMA = True
 except ImportError:
     HAS_PANORAMA = False
@@ -41,18 +57,18 @@ except ImportError:
 class BaseGLViewport(QOpenGLWidget):
     """Base OpenGL viewport widget for 3D rendering."""
 
-    marker_selected = Signal(object)   # single-click: highlight + scroll only
-    marker_activated = Signal(object)   # double-click: open info panel
+    marker_selected = Signal(object)  # single-click: highlight + scroll only
+    marker_activated = Signal(object)  # double-click: open info panel
     fps_updated = Signal(float)
 
     def __init__(self, layer_manager: LayerManager, parent=None):
+        super().__init__(parent)
         fmt = QSurfaceFormat()
         fmt.setSamples(4)
         fmt.setDepthBufferSize(24)
         fmt.setVersion(2, 1)
-        QSurfaceFormat.setDefaultFormat(fmt)
+        self.setFormat(fmt)
 
-        super().__init__(parent)
         self.setMinimumSize(600, 400)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)  # enable hover events
@@ -69,14 +85,19 @@ class BaseGLViewport(QOpenGLWidget):
         # Mouse state
         self._last_mouse = None
         self._mouse_btn = None
-        self._click_pos = None   # position at mousePress (for drag detection)
+        self._click_pos = None  # position at mousePress (for drag detection)
 
         # Render settings
         self.point_size = 2.0
         self.show_axes = True
         self.show_grid = True
-        self.use_layer_colors = True   # True = use layer.color; False = use per-vertex RGB
-        self.bg_color = COLORS['gl_bg']
+        self.use_layer_colors = (
+            True  # True = use layer.color; False = use per-vertex RGB
+        )
+        self.fps_movement = (
+            False  # True = WASD/QE moves camera; False = scene correction
+        )
+        self.bg_color = COLORS["gl_bg"]
 
         # Scene bounds (set after loading)
         self._scene_center = np.zeros(3)
@@ -88,7 +109,7 @@ class BaseGLViewport(QOpenGLWidget):
         self._vbos: Dict[Tuple[str, str], int] = {}
 
         # Interactive decimation state
-        self._interacting = False        # mouse-drag orbit/pan
+        self._interacting = False  # mouse-drag orbit/pan
         self._adjusting_opacity = False  # opacity slider being dragged
 
         # Scene clipping: None = no clip, or (x0, x1, y0, y1, z0, z1)
@@ -119,11 +140,11 @@ class BaseGLViewport(QOpenGLWidget):
         self.cam_distance = radius * 2.5
         self.cam_azimuth = 45.0
         self.cam_elevation = 30.0
-        
+
         # Adjust grid size to fit scene
         scene_diameter = radius * 2
         desired_grid = scene_diameter * 1.2
-        
+
         # Round to nice grid values
         if desired_grid < 5:
             self._grid_size = 5.0
@@ -139,7 +160,6 @@ class BaseGLViewport(QOpenGLWidget):
             self._grid_size = 200.0
         else:
             self._grid_size = np.ceil(desired_grid / 100) * 100
-        
 
         self.update()
 
@@ -189,12 +209,15 @@ class BaseGLViewport(QOpenGLWidget):
     def paintGL(self):
         if not HAS_OPENGL:
             return
-        if not getattr(self, '_gl_ok', True):
+        if not getattr(self, "_gl_ok", True):
             return
 
         try:
             self._paintGL_inner()
         except Exception:
+            import traceback
+
+            traceback.print_exc()
             try:
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             except Exception:
@@ -202,8 +225,9 @@ class BaseGLViewport(QOpenGLWidget):
 
     # --- VBO helpers ---
 
-    def _get_or_create_vbo(self, layer_id: str, kind: str,
-                           data: np.ndarray, target: int = GL_ARRAY_BUFFER) -> int:
+    def _get_or_create_vbo(
+        self, layer_id: str, kind: str, data: np.ndarray, target: int = GL_ARRAY_BUFFER
+    ) -> int:
         """Return an existing VBO or upload *data* to a new one.
 
         On Apple-Silicon UMA the OpenGL→Metal translation layer maps a
@@ -280,15 +304,13 @@ class BaseGLViewport(QOpenGLWidget):
             look_y = self.cam_target[1]
             look_z = self.cam_target[2]
 
-        gluLookAt(cam_x, cam_y, cam_z,
-                  look_x, look_y, look_z,
-                  0, 0, 1)
+        gluLookAt(cam_x, cam_y, cam_z, look_x, look_y, look_z, 0, 0, 1)
 
         # Light follows camera
         glLightfv(GL_LIGHT0, GL_POSITION, [cam_x, cam_y, cam_z, 1.0])
 
         # Global ground reference plane at Z=0 (before correction)
-        if getattr(self, 'show_ground_plane', False):
+        if getattr(self, "show_ground_plane", False):
             self._draw_ground_plane()
 
         # Grid and axes in absolute world space (before correction)
@@ -319,12 +341,12 @@ class BaseGLViewport(QOpenGLWidget):
         if clip is not None:
             x0, x1, y0, y1, z0, z1 = clip
             # 6 clip planes: +X, -X, +Y, -Y, +Z, -Z
-            glClipPlane(GL_CLIP_PLANE0, [ 1,  0,  0, -x0])  # x >= x0
-            glClipPlane(GL_CLIP_PLANE1, [-1,  0,  0,  x1])  # x <= x1
-            glClipPlane(GL_CLIP_PLANE2, [ 0,  1,  0, -y0])  # y >= y0
-            glClipPlane(GL_CLIP_PLANE3, [ 0, -1,  0,  y1])  # y <= y1
-            glClipPlane(GL_CLIP_PLANE4, [ 0,  0,  1, -z0])  # z >= z0
-            glClipPlane(GL_CLIP_PLANE5, [ 0,  0, -1,  z1])  # z <= z1
+            glClipPlane(GL_CLIP_PLANE0, [1, 0, 0, -x0])  # x >= x0
+            glClipPlane(GL_CLIP_PLANE1, [-1, 0, 0, x1])  # x <= x1
+            glClipPlane(GL_CLIP_PLANE2, [0, 1, 0, -y0])  # y >= y0
+            glClipPlane(GL_CLIP_PLANE3, [0, -1, 0, y1])  # y <= y1
+            glClipPlane(GL_CLIP_PLANE4, [0, 0, 1, -z0])  # z >= z0
+            glClipPlane(GL_CLIP_PLANE5, [0, 0, -1, z1])  # z <= z1
             for i in range(6):
                 glEnable(GL_CLIP_PLANE0 + i)
 
@@ -339,11 +361,14 @@ class BaseGLViewport(QOpenGLWidget):
         # huge layers (e.g. 120M raw E57 scans).
         INTERACTIVE_BUDGET = 5_000_000
         if self._interacting:
-            total_vis = sum(l.point_count for l in visible
-                           if l.layer_type == "pointcloud")
+            total_vis = sum(
+                l.point_count for l in visible if l.layer_type == "pointcloud"
+            )
             self._global_interact_stride = (
                 max(1, total_vis // INTERACTIVE_BUDGET)
-                if total_vis > INTERACTIVE_BUDGET else 1)
+                if total_vis > INTERACTIVE_BUDGET
+                else 1
+            )
         else:
             self._global_interact_stride = 1
 
@@ -397,9 +422,9 @@ class BaseGLViewport(QOpenGLWidget):
         dx = math.cos(pitch_r) * math.cos(yaw_r)
         dy = math.cos(pitch_r) * math.sin(yaw_r)
         dz = math.sin(pitch_r)
-        gluLookAt(pos[0], pos[1], pos[2],
-                  pos[0] + dx, pos[1] + dy, pos[2] + dz,
-                  0, 0, 1)
+        gluLookAt(
+            pos[0], pos[1], pos[2], pos[0] + dx, pos[1] + dy, pos[2] + dz, 0, 0, 1
+        )
 
         # Light at station
         glLightfv(GL_LIGHT0, GL_POSITION, [pos[0], pos[1], pos[2], 1.0])
@@ -437,8 +462,11 @@ class BaseGLViewport(QOpenGLWidget):
             base_size = self.point_size
 
         # Scale point size with zoom only for sparse layers (<100k pts)
-        if (layer.point_count < 100000 and
-                layer.id != "raw_scan" and self._scene_radius > 0):
+        if (
+            layer.point_count < 100000
+            and layer.id != "raw_scan"
+            and self._scene_radius > 0
+        ):
             ref_distance = self._scene_radius * 2.5
             zoom_ratio = ref_distance / max(self.cam_distance, 0.1)
             zoom_scale = max(1.0, min(zoom_ratio, 10.0))
@@ -487,24 +515,24 @@ class BaseGLViewport(QOpenGLWidget):
         elif self._interacting and layer.point_count > MAX_INTERACTIVE_PTS:
             stride = max(1, layer.point_count // MAX_INTERACTIVE_PTS)
         elif self._interacting:
-            stride = getattr(self, '_global_interact_stride', 1)
+            stride = getattr(self, "_global_interact_stride", 1)
         else:
             stride = 1
 
-        pts_stride = stride * 3 * 4   # bytes between consecutive vertices
-        rgb_stride = stride * 3 * 4   # same layout for 3-component colors
+        pts_stride = stride * 3 * 4  # bytes between consecutive vertices
+        rgb_stride = stride * 3 * 4  # same layout for 3-component colors
         draw_count = layer.point_count // stride
 
         # --- VBO path ---
-        vbo_pts = self._get_or_create_vbo(layer.id, 'pts', pts)
+        vbo_pts = self._get_or_create_vbo(layer.id, "pts", pts)
         glBindBuffer(GL_ARRAY_BUFFER, vbo_pts)
         glEnableClientState(GL_VERTEX_ARRAY)
         glVertexPointer(3, GL_FLOAT, pts_stride, None)
 
         if has_vtx_colors:
-            colors = layer.get_colors_array()   # Nx3 RGB float32 — immutable
+            colors = layer.get_colors_array()  # Nx3 RGB float32 — immutable
             if colors is not None:
-                vbo_rgb = self._get_or_create_vbo(layer.id, 'rgb', colors)
+                vbo_rgb = self._get_or_create_vbo(layer.id, "rgb", colors)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo_rgb)
                 glEnableClientState(GL_COLOR_ARRAY)
                 glColorPointer(3, GL_FLOAT, rgb_stride, None)
@@ -554,7 +582,7 @@ class BaseGLViewport(QOpenGLWidget):
             glColor4f(0.6, 0.65, 0.7, layer.opacity)
 
         # --- VBO path ---
-        vbo_pts = self._get_or_create_vbo(layer.id, 'pts', pts)
+        vbo_pts = self._get_or_create_vbo(layer.id, "pts", pts)
         glBindBuffer(GL_ARRAY_BUFFER, vbo_pts)
         glEnableClientState(GL_VERTEX_ARRAY)
         glVertexPointer(3, GL_FLOAT, 0, None)
@@ -562,7 +590,7 @@ class BaseGLViewport(QOpenGLWidget):
         # Normals
         normals = layer.get_normals_array()
         if normals is not None:
-            vbo_n = self._get_or_create_vbo(layer.id, 'normals', normals)
+            vbo_n = self._get_or_create_vbo(layer.id, "normals", normals)
             glBindBuffer(GL_ARRAY_BUFFER, vbo_n)
             glEnableClientState(GL_NORMAL_ARRAY)
             glNormalPointer(GL_FLOAT, 0, None)
@@ -571,14 +599,15 @@ class BaseGLViewport(QOpenGLWidget):
         if has_vtx_colors:
             colors = layer.get_colors_array()
             if colors is not None:
-                vbo_rgb = self._get_or_create_vbo(layer.id, 'rgb', colors)
+                vbo_rgb = self._get_or_create_vbo(layer.id, "rgb", colors)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo_rgb)
                 glEnableClientState(GL_COLOR_ARRAY)
                 glColorPointer(3, GL_FLOAT, 0, None)
 
         # Index buffer
-        vbo_idx = self._get_or_create_vbo(layer.id, 'tris', tris,
-                                          target=GL_ELEMENT_ARRAY_BUFFER)
+        vbo_idx = self._get_or_create_vbo(
+            layer.id, "tris", tris, target=GL_ELEMENT_ARRAY_BUFFER
+        )
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vbo_idx)
 
         needs_blend = layer.opacity < 0.99
@@ -618,7 +647,7 @@ class BaseGLViewport(QOpenGLWidget):
         else:
             glColor4f(1.0, 0.3, 0.3, layer.opacity)
 
-        vbo_lines = self._get_or_create_vbo(layer.id, 'lines', lines)
+        vbo_lines = self._get_or_create_vbo(layer.id, "lines", lines)
         glBindBuffer(GL_ARRAY_BUFFER, vbo_lines)
         glEnableClientState(GL_VERTEX_ARRAY)
         glVertexPointer(3, GL_FLOAT, 0, None)
@@ -626,7 +655,7 @@ class BaseGLViewport(QOpenGLWidget):
         if has_vtx_colors:
             colors = layer.get_colors_array()
             if colors is not None:
-                vbo_rgb = self._get_or_create_vbo(layer.id, 'rgb', colors)
+                vbo_rgb = self._get_or_create_vbo(layer.id, "rgb", colors)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo_rgb)
                 glEnableClientState(GL_COLOR_ARRAY)
                 glColorPointer(3, GL_FLOAT, 0, None)
@@ -653,9 +682,15 @@ class BaseGLViewport(QOpenGLWidget):
         glLineWidth(2.0)
         length = self._scene_radius * 0.15 if self._scene_radius > 0 else 1.0
         glBegin(GL_LINES)
-        glColor3f(0.9, 0.2, 0.2); glVertex3f(0, 0, 0); glVertex3f(length, 0, 0)
-        glColor3f(0.2, 0.9, 0.2); glVertex3f(0, 0, 0); glVertex3f(0, length, 0)
-        glColor3f(0.2, 0.2, 0.9); glVertex3f(0, 0, 0); glVertex3f(0, 0, length)
+        glColor3f(0.9, 0.2, 0.2)
+        glVertex3f(0, 0, 0)
+        glVertex3f(length, 0, 0)
+        glColor3f(0.2, 0.9, 0.2)
+        glVertex3f(0, 0, 0)
+        glVertex3f(0, length, 0)
+        glColor3f(0.2, 0.2, 0.9)
+        glVertex3f(0, 0, 0)
+        glVertex3f(0, 0, length)
         glEnd()
         glEnable(GL_LIGHTING)
 
@@ -668,11 +703,11 @@ class BaseGLViewport(QOpenGLWidget):
         # Grid centered on scene center (XY plane at Z=0)
         center_x = self._scene_center[0]
         center_y = self._scene_center[1]
-        
+
         # Grid size and spacing
         half_size = self._grid_size / 2
         spacing = self._grid_size / 10
-        
+
         glBegin(GL_LINES)
         # Draw 11 lines in each direction (10 divisions)
         for i in range(11):
@@ -715,9 +750,9 @@ class BaseGLViewport(QOpenGLWidget):
             t = -half + i * step
             # Centered on absolute origin (0, 0, 0)
             glVertex3f(t, -half, 0.0)
-            glVertex3f(t,  half, 0.0)
+            glVertex3f(t, half, 0.0)
             glVertex3f(-half, t, 0.0)
-            glVertex3f( half, t, 0.0)
+            glVertex3f(half, t, 0.0)
         glEnd()
         glEnable(GL_LIGHTING)
 
@@ -765,7 +800,7 @@ class BaseGLViewport(QOpenGLWidget):
             return
 
         # Determine the peak angle for color-coding
-        peak = getattr(diag, 'peak_angle_deg', 0.0)
+        peak = getattr(diag, "peak_angle_deg", 0.0)
 
         # Color-code each cell by its angle relative to the peak
         # 0-10° from peak → green (parallel wall)
@@ -775,14 +810,22 @@ class BaseGLViewport(QOpenGLWidget):
         scene_cy = float(np.mean([p.centroid[1] for p in diag.wall_planes]))
 
         for plane in diag.wall_planes:
-            cx, cy, cz = float(plane.centroid[0]), float(plane.centroid[1]), float(plane.centroid[2])
-            nx, ny, nz = float(plane.normal[0]), float(plane.normal[1]), float(plane.normal[2])
+            cx, cy, cz = (
+                float(plane.centroid[0]),
+                float(plane.centroid[1]),
+                float(plane.centroid[2]),
+            )
+            nx, ny, nz = (
+                float(plane.normal[0]),
+                float(plane.normal[1]),
+                float(plane.normal[2]),
+            )
             # Compute extent from bounding box
-            if hasattr(plane, 'bbox_max') and plane.bbox_max is not None:
+            if hasattr(plane, "bbox_max") and plane.bbox_max is not None:
                 span = plane.bbox_max - plane.bbox_min
                 ext = max(float(np.max(span)) * 0.5, 0.3)
             else:
-                ext = max(getattr(plane, 'extent', 1.0) * 0.5, 0.3)
+                ext = max(getattr(plane, "extent", 1.0) * 0.5, 0.3)
 
             # Angle difference from peak (mod 90°)
             diff = abs(plane.angle_deg - peak)
@@ -790,18 +833,22 @@ class BaseGLViewport(QOpenGLWidget):
                 diff = 90 - diff
 
             # Color by qualifying status
-            is_qualifying = getattr(plane, 'qualifying', False)
-            is_large = getattr(plane, 'area', 0) >= 5.0
+            is_qualifying = getattr(plane, "qualifying", False)
+            is_large = getattr(plane, "area", 0) >= 5.0
 
             if is_qualifying:
-                r, g, b, a = 0.0, 1.0, 0.3, 0.35   # bright green — qualifying
+                r, g, b, a = 0.0, 1.0, 0.3, 0.35  # bright green — qualifying
             elif is_large:
-                r, g, b, a = 0.8, 0.4, 0.0, 0.2    # dim orange — large but not qualifying
+                r, g, b, a = 0.8, 0.4, 0.0, 0.2  # dim orange — large but not qualifying
             else:
                 continue  # skip small non-qualifying surfaces
 
             # Plane tangent vectors
-            up = np.array([0.0, 0.0, 1.0]) if abs(nz) < 0.9 else np.array([1.0, 0.0, 0.0])
+            up = (
+                np.array([0.0, 0.0, 1.0])
+                if abs(nz) < 0.9
+                else np.array([1.0, 0.0, 0.0])
+            )
             t1 = np.cross(plane.normal, up)
             t1 /= np.linalg.norm(t1) + 1e-10
             t2 = np.cross(plane.normal, t1)
@@ -811,8 +858,8 @@ class BaseGLViewport(QOpenGLWidget):
             glColor4f(r, g, b, a)
             corners = [
                 plane.centroid + ext * (-t1 - t2),
-                plane.centroid + ext * ( t1 - t2),
-                plane.centroid + ext * ( t1 + t2),
+                plane.centroid + ext * (t1 - t2),
+                plane.centroid + ext * (t1 + t2),
                 plane.centroid + ext * (-t1 + t2),
             ]
             glBegin(GL_QUADS)
@@ -830,20 +877,30 @@ class BaseGLViewport(QOpenGLWidget):
 
         # ── Normal arrows for top qualifying surfaces ───────────
         top = sorted(
-            [p for p in diag.wall_planes if getattr(p, 'area', 0) >= 5.0],
-            key=lambda p: p.point_count, reverse=True)[:20]
+            [p for p in diag.wall_planes if getattr(p, "area", 0) >= 5.0],
+            key=lambda p: p.point_count,
+            reverse=True,
+        )[:20]
         for plane in top:
-            cx, cy, cz = float(plane.centroid[0]), float(plane.centroid[1]), float(plane.centroid[2])
-            nx, ny, nz = float(plane.normal[0]), float(plane.normal[1]), float(plane.normal[2])
-            if getattr(plane, 'qualifying', False):
+            cx, cy, cz = (
+                float(plane.centroid[0]),
+                float(plane.centroid[1]),
+                float(plane.centroid[2]),
+            )
+            nx, ny, nz = (
+                float(plane.normal[0]),
+                float(plane.normal[1]),
+                float(plane.normal[2]),
+            )
+            if getattr(plane, "qualifying", False):
                 glColor4f(0.0, 1.0, 0.3, 1.0)
             else:
                 glColor4f(0.8, 0.5, 0.0, 0.7)
-            if hasattr(plane, 'bbox_max') and plane.bbox_max is not None:
+            if hasattr(plane, "bbox_max") and plane.bbox_max is not None:
                 span = plane.bbox_max - plane.bbox_min
                 arrow_len = max(float(np.max(span)) * 0.4, 0.5)
             else:
-                arrow_len = max(getattr(plane, 'extent', 1.0) * 0.8, 0.5)
+                arrow_len = max(getattr(plane, "extent", 1.0) * 0.8, 0.5)
             glLineWidth(2.5)
             glBegin(GL_LINES)
             glVertex3f(cx, cy, cz)
@@ -860,29 +917,33 @@ class BaseGLViewport(QOpenGLWidget):
             glRotatef(-sc.rotate_z, 0, 0, 1)
 
         grid_extent = max(self._scene_radius * 0.6, 8.0)
-        grid_spacing = 5.0   # metres between markers
-        cross_arm = 1.0      # half-length of each cross arm
+        grid_spacing = 5.0  # metres between markers
+        cross_arm = 1.0  # half-length of each cross arm
 
         # Blue markers — final position after alignment correction (axis-aligned = 0°)
         self._draw_fiducial_grid(
-            cx=scene_cx, cy=scene_cy, cz=0.0,
+            cx=scene_cx,
+            cy=scene_cy,
+            cz=0.0,
             angle_deg=0.0,
             extent=grid_extent,
             spacing=grid_spacing,
             arm_len=cross_arm,
             color=(0.3, 0.5, 1.0, 0.7),
-            line_width=2.0
+            line_width=2.0,
         )
 
         # Magenta cross = original scene position detected by wall planes
         if abs(diag.wall_correction_deg) > 0.001:
             indicator_len = max(self._scene_radius * 0.4, 5.0)
             self._draw_fiducial_cross(
-                cx=scene_cx, cy=scene_cy, cz=0.0,
+                cx=scene_cx,
+                cy=scene_cy,
+                cz=0.0,
                 angle_deg=-diag.wall_correction_deg,
                 arm_len=indicator_len,
                 color=(1.0, 0.0, 1.0, 0.8),
-                line_width=4.0
+                line_width=4.0,
             )
 
         glPopMatrix()
@@ -892,12 +953,19 @@ class BaseGLViewport(QOpenGLWidget):
         glDisable(GL_BLEND)
         glEnable(GL_LIGHTING)
 
-    def _draw_fiducial_cross(self, cx: float, cy: float, cz: float, 
-                             angle_deg: float, arm_len: float, 
-                             color: tuple[float, float, float, float], 
-                             line_width: float):
+    def _draw_fiducial_cross(
+        self,
+        cx: float,
+        cy: float,
+        cz: float,
+        angle_deg: float,
+        arm_len: float,
+        color: tuple[float, float, float, float],
+        line_width: float,
+    ):
         """Draw a single rotated cross at (cx, cy, cz)."""
         import math as _m
+
         rad = _m.radians(angle_deg)
         cos_a = _m.cos(rad)
         sin_a = _m.sin(rad)
@@ -913,12 +981,21 @@ class BaseGLViewport(QOpenGLWidget):
         glVertex3f(cx - arm_len * sin_a, cy + arm_len * cos_a, cz)
         glEnd()
 
-    def _draw_fiducial_grid(self, cx: float, cy: float, cz: float, 
-                           angle_deg: float, extent: float, spacing: float, 
-                           arm_len: float, color: tuple[float, float, float, float], 
-                           line_width: float):
+    def _draw_fiducial_grid(
+        self,
+        cx: float,
+        cy: float,
+        cz: float,
+        angle_deg: float,
+        extent: float,
+        spacing: float,
+        arm_len: float,
+        color: tuple[float, float, float, float],
+        line_width: float,
+    ):
         """Draw a grid of small rotated crosses within 'extent' distance of (cx, cy)."""
         import math as _m
+
         rad = _m.radians(angle_deg)
         cos_a = _m.cos(rad)
         sin_a = _m.sin(rad)
@@ -993,15 +1070,22 @@ class BaseGLViewport(QOpenGLWidget):
         dy = pos.y() - self._last_mouse.y()
 
         # Check for Shift+Left button (pan/strafe)
-        if self._mouse_btn == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+        if (
+            self._mouse_btn == Qt.MouseButton.LeftButton
+            and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
             # Shift+Left drag = pan (same as middle mouse)
             scale = self.cam_distance * 0.002
             az = math.radians(self.cam_azimuth)
             el = math.radians(self.cam_elevation)
             right = np.array([-math.sin(az), math.cos(az), 0.0])
-            up = np.array([-math.cos(az) * math.sin(el),
-                           -math.sin(az) * math.sin(el),
-                           math.cos(el)])
+            up = np.array(
+                [
+                    -math.cos(az) * math.sin(el),
+                    -math.sin(az) * math.sin(el),
+                    math.cos(el),
+                ]
+            )
             self.cam_target -= right * dx * scale
             self.cam_target += up * dy * scale
         elif self._mouse_btn == Qt.MouseButton.LeftButton:
@@ -1018,20 +1102,26 @@ class BaseGLViewport(QOpenGLWidget):
             az = math.radians(self.cam_azimuth)
             el = math.radians(self.cam_elevation)
             right = np.array([-math.sin(az), math.cos(az), 0.0])
-            up = np.array([-math.cos(az) * math.sin(el),
-                           -math.sin(az) * math.sin(el),
-                           math.cos(el)])
+            up = np.array(
+                [
+                    -math.cos(az) * math.sin(el),
+                    -math.sin(az) * math.sin(el),
+                    math.cos(el),
+                ]
+            )
             self.cam_target -= right * dx * scale
             self.cam_target += up * dy * scale
         elif self._mouse_btn == Qt.MouseButton.RightButton:
             # Right drag = dolly (zoom by moving forward, not just changing distance)
             az = math.radians(self.cam_azimuth)
             el = math.radians(self.cam_elevation)
-            forward = np.array([
-                -math.cos(el) * math.cos(az),
-                -math.cos(el) * math.sin(az),
-                -math.sin(el),
-            ])
+            forward = np.array(
+                [
+                    -math.cos(el) * math.cos(az),
+                    -math.cos(el) * math.sin(az),
+                    -math.sin(el),
+                ]
+            )
             step = self._scene_radius * 0.005 * dy
             self.cam_target += forward * step
             # Tighten orbit radius to stay close to target
@@ -1043,15 +1133,17 @@ class BaseGLViewport(QOpenGLWidget):
 
     def mouseDoubleClickEvent(self, event):
         """Double-click on panorama marker → select + open info panel."""
-        if (event.button() == Qt.MouseButton.LeftButton
-                and self._panorama
-                and not self._panorama.is_active):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._panorama
+            and not self._panorama.is_active
+        ):
             pos = event.position()
             self.makeCurrent()
             layers = self.layer_manager.layers
             hit = self._panorama.hit_test(
-                layers, pos.x(), pos.y(),
-                self.width(), self.height())
+                layers, pos.x(), pos.y(), self.width(), self.height()
+            )
             self.doneCurrent()
             if hit:
                 self._panorama.select_layer(hit)
@@ -1063,13 +1155,17 @@ class BaseGLViewport(QOpenGLWidget):
 
     def mouseReleaseEvent(self, event):
         # Check for click (not drag) on a panorama marker
-        if (self._click_pos is not None
-                and event.button() == Qt.MouseButton.LeftButton
-                and self._panorama
-                and not self._panorama.is_active):
+        if (
+            self._click_pos is not None
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._panorama
+            and not self._panorama.is_active
+        ):
             pos = event.position()
-            drag = math.sqrt((pos.x() - self._click_pos.x()) ** 2 +
-                             (pos.y() - self._click_pos.y()) ** 2)
+            drag = math.sqrt(
+                (pos.x() - self._click_pos.x()) ** 2
+                + (pos.y() - self._click_pos.y()) ** 2
+            )
             if drag < self._CLICK_THRESHOLD:
                 self._handle_marker_click(pos)
 
@@ -1097,11 +1193,13 @@ class BaseGLViewport(QOpenGLWidget):
         # Normal mode: dolly through scene
         az = math.radians(self.cam_azimuth)
         el = math.radians(self.cam_elevation)
-        forward = np.array([
-            -math.cos(el) * math.cos(az),
-            -math.cos(el) * math.sin(az),
-            -math.sin(el),
-        ])
+        forward = np.array(
+            [
+                -math.cos(el) * math.cos(az),
+                -math.cos(el) * math.sin(az),
+                -math.sin(el),
+            ]
+        )
         step = self._scene_radius * 0.03 * (1 if delta > 0 else -1)
         self.cam_target += forward * step
         self.cam_distance = min(self.cam_distance, self._scene_radius * 0.3)
@@ -1109,8 +1207,9 @@ class BaseGLViewport(QOpenGLWidget):
         self.update()
 
     # --- Scene correction keyboard step sizes ---
-    _SHIFT_STEP = 0.05    # metres per key press
-    _ROTATE_STEP = 0.1    # degrees per key press
+    _SHIFT_STEP = 0.05  # metres per key press
+    _ROTATE_STEP = 0.1  # degrees per key press
+    _FPS_MOVE_STEP = 0.01  # multiplied by scene_radius for scale-independent speed
 
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts.
@@ -1137,6 +1236,32 @@ class BaseGLViewport(QOpenGLWidget):
             mult = 10.0
         elif mods & Qt.KeyboardModifier.ControlModifier:
             mult = 100.0
+
+        if self.fps_movement:
+            fps_handled = True
+            step = self._scene_radius * self._FPS_MOVE_STEP * mult
+            az = math.radians(self.cam_azimuth)
+            forward = np.array([-math.cos(az), -math.sin(az), 0.0])
+            right = np.array([-math.sin(az), math.cos(az), 0.0])
+
+            if key == Qt.Key.Key_W:
+                self.cam_target += forward * step
+            elif key == Qt.Key.Key_S:
+                self.cam_target -= forward * step
+            elif key == Qt.Key.Key_A:
+                self.cam_target -= right * step
+            elif key == Qt.Key.Key_D:
+                self.cam_target += right * step
+            elif key == Qt.Key.Key_Q:
+                self.cam_target[2] -= step
+            elif key == Qt.Key.Key_E:
+                self.cam_target[2] += step
+            else:
+                fps_handled = False
+
+            if fps_handled:
+                self.update()
+                return
 
         sc = self.scene_correction
         handled = True
@@ -1172,8 +1297,10 @@ class BaseGLViewport(QOpenGLWidget):
             sc.rotate_x = round(sc.rotate_x, 4)
             sc.rotate_y = round(sc.rotate_y, 4)
             sc.rotate_z = round(sc.rotate_z, 4)
-            print(f"correction: rot=({sc.rotate_x}, {sc.rotate_y}, {sc.rotate_z})°  "
-                  f"shift=({sc.shift_x}, {sc.shift_y}, {sc.shift_z})")
+            print(
+                f"correction: rot=({sc.rotate_x}, {sc.rotate_y}, {sc.rotate_z})°  "
+                f"shift=({sc.shift_x}, {sc.shift_y}, {sc.shift_z})"
+            )
             self.update()
             return
 
@@ -1206,8 +1333,8 @@ class BaseGLViewport(QOpenGLWidget):
         self.makeCurrent()
         layers = self.layer_manager.layers
         hit = self._panorama.hit_test(
-            layers, pos.x(), pos.y(),
-            self.width(), self.height())
+            layers, pos.x(), pos.y(), self.width(), self.height()
+        )
         self.doneCurrent()
         self._panorama.select_layer(hit)
         self.marker_selected.emit(hit)
@@ -1221,12 +1348,11 @@ class BaseGLViewport(QOpenGLWidget):
         pos = event.position()
         layers = self.layer_manager.layers
         hit = self._panorama.hit_test(
-            layers, pos.x(), pos.y(),
-            self.width(), self.height())
+            layers, pos.x(), pos.y(), self.width(), self.height()
+        )
         self.doneCurrent()
         if hit:
-            QToolTip.showText(event.globalPosition().toPoint(),
-                              hit.name)
+            QToolTip.showText(event.globalPosition().toPoint(), hit.name)
         else:
             QToolTip.hideText()
 
