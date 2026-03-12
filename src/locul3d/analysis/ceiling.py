@@ -38,16 +38,27 @@ class CeilingDetector:
         for layer in layers:
             if layer.points is None or len(layer.points) == 0:
                 continue
-            z_col = layer.points[:, 2]
-            z_min_global = min(z_min_global, float(z_col.min()))
-            z_max_global = max(z_max_global, float(z_col.max()))
-            total_pts += len(z_col)
+            z_col = layer.points[:, 2].astype(np.float64)
+            finite = z_col[np.isfinite(z_col)]
+            if len(finite) == 0:
+                continue
+            z_min_global = min(z_min_global, float(finite.min()))
+            z_max_global = max(z_max_global, float(finite.max()))
+            total_pts += len(finite)
 
         if total_pts < 100 or z_max_global - z_min_global < 1.0:
             return None
 
+        # Clamp Z range to physically reasonable bounds (no scan > 100m tall)
+        z_min_global = max(z_min_global, -100.0)
+        z_max_global = min(z_max_global, 100.0)
+        z_range = z_max_global - z_min_global
+        if z_range < 1.0 or z_range > 200.0:
+            return None
+
         # Build histogram incrementally (no concatenation)
-        n_bins = int((z_max_global - z_min_global) / self.bin_size) + 1
+        n_bins = int(z_range / self.bin_size) + 1
+        n_bins = min(n_bins, 100_000)  # safety cap
         counts = np.zeros(n_bins, dtype=np.int64)
 
         # Subsampling stride
@@ -56,7 +67,13 @@ class CeilingDetector:
         for layer in layers:
             if layer.points is None or len(layer.points) == 0:
                 continue
-            z_col = layer.points[::stride, 2]
+            z_col = layer.points[::stride, 2].astype(np.float64)
+            # Filter non-finite values (NaN/inf from corrupt data)
+            finite_mask = np.isfinite(z_col)
+            if not finite_mask.all():
+                z_col = z_col[finite_mask]
+            if len(z_col) == 0:
+                continue
             # Bin indices for this layer's Z values
             indices = np.clip(
                 ((z_col - z_min_global) / self.bin_size).astype(np.int64),
