@@ -587,6 +587,9 @@ class E57ImportWorker(QThread):
             layer.pano_type = station["type"]
             layer.pano_equirect = station.get("equirect")
             layer.pano_faces = station.get("faces")
+            layer.pano_jpeg_bytes = station.get("jpeg_bytes")
+            layer.pano_image_size = station.get("image_size")
+            layer.pano_face_bytes = station.get("face_bytes")
             layer.point_count = 1  # marker
             layer.loaded = True
             layers.append(layer)

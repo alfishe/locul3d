@@ -277,18 +277,25 @@ class InfoPanel(QWidget):
 
         # Image dimensions
         equirect = getattr(layer, 'pano_equirect', None)
+        image_size = getattr(layer, 'pano_image_size', None)
         if equirect is not None:
             rows.append(("Image Size", f"{equirect.size[0]}×{equirect.size[1]}"))
             rows.append(("Image Mode", str(equirect.mode)))
+        elif image_size is not None:
+            rows.append(("Image Size", f"{image_size[0]}×{image_size[1]}"))
 
         # Cubemap faces
         faces = getattr(layer, 'pano_faces', None)
+        face_bytes = getattr(layer, 'pano_face_bytes', None)
         if faces is not None:
             n_faces = sum(1 for f in faces if f is not None)
             rows.append(("Cubemap Faces", f"{n_faces}/6"))
             first = next((f for f in faces if f is not None), None)
             if first:
                 rows.append(("Face Size", f"{first.size[0]}×{first.size[1]}"))
+        elif face_bytes is not None:
+            n_faces = sum(1 for f in face_bytes if f is not None)
+            rows.append(("Cubemap Faces", f"{n_faces}/6"))
 
         if rows:
             self._add_section("Panorama", rows)

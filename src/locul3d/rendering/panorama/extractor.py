@@ -47,35 +47,33 @@ PANORAMA_LAYER_OPACITY = 1.0
 
 
 def _process_image_task(task: dict[str, Any]) -> dict[str, Any] | None:
-    """Decode and pre-process a single image (parallelizable).
+    """Store raw compressed JPEG/PNG bytes (no decode at import time).
 
-    This performs the CPU-heavy JPEG/PNG decode and the horizontal
-    mirror (for inside-out sphere UV convention) in a worker thread.
-    Orientation correction is now handled via GL quaternion rotation
-    in the renderer — pixel shifts can't represent roll.
+    Decoding and mirroring are deferred to first panorama enter().
+    Only reads image dimensions from metadata or a header-only open.
     """
     buf = task["buf"]
-    try:
-        pil_img = PILImage.open(io.BytesIO(buf.tobytes()))
-        pil_img.load()
-    except Exception:
-        return None
+    jpeg_bytes = buf.tobytes()
 
-    w = task["w_meta"] or pil_img.width
-    h = task["h_meta"] or pil_img.height
+    w_meta = task["w_meta"]
+    h_meta = task["h_meta"]
     rep_key = task["rep_key"]
+
+    w, h = w_meta, h_meta
+    if w == 0 and h == 0:
+        try:
+            tmp = PILImage.open(io.BytesIO(jpeg_bytes))
+            w, h = tmp.size
+        except Exception:
+            return None
 
     is_spherical = (
         rep_key == "sphericalRepresentation"
         or (rep_key == "direct" and w >= SPHERICAL_ASPECT_RATIO * h)
     )
 
-    # Mirror for spherical/cylindrical (inside-out sphere UV convention)
-    if is_spherical or rep_key == "cylindricalRepresentation":
-        pil_img = pil_img.transpose(PILImage.FLIP_LEFT_RIGHT)
-
     return {
-        "img": pil_img,
+        "jpeg_bytes": jpeg_bytes,
         "pos": task["pos"],
         "quat": task["quat"],
         "w": w,
@@ -84,24 +82,27 @@ def _process_image_task(task: dict[str, Any]) -> dict[str, Any] | None:
         "rep_key": rep_key,
     }
 
-
 def extract_panoramas(path: str,
                       log_fn: Optional[Callable[[str], None]] = None,
                       ) -> List[dict]:
     """Extract panorama images from an E57 file.
 
-    Returns a list of station dictionaries::
+    Returns a list of station dictionaries with compressed JPEG bytes
+    (no decoded PIL images).  Decoding is deferred to first enter()::
 
         {
-            "id":       "panorama_0",
-            "name":     "Panorama 0 (spherical, 8192x4096)",
-            "position": np.array([x, y, z]),
-            "rotation": (qx, qy, qz, qw) or None,
-            "type":     "spherical" | "cubemap",
-            "equirect": PIL.Image | None,       # for spherical
-            "faces":    [PIL.Image, ...] | None, # for cubemap (6 faces)
-            "color":    PANORAMA_LAYER_COLOR,
-            "opacity":  PANORAMA_LAYER_OPACITY,
+            "id":         "panorama_0",
+            "name":       "Panorama 0 (spherical, 8192x4096)",
+            "position":   np.array([x, y, z]),
+            "rotation":   (qx, qy, qz, qw) or None,
+            "type":       "spherical" | "cubemap",
+            "equirect":   None,
+            "faces":      None,
+            "jpeg_bytes": bytes | None,       # compressed JPEG (spherical/cyl)
+            "image_size": (w, h) | None,      # pixel dimensions
+            "face_bytes": [bytes, ...] | None, # per-face JPEG (cubemap)
+            "color":      PANORAMA_LAYER_COLOR,
+            "opacity":    PANORAMA_LAYER_OPACITY,
         }
 
     Parameters
@@ -302,15 +303,17 @@ def _build_spherical_station(idx, imgs, pos, quat) -> dict:
       1. Mirror horizontally
       2. Apply station yaw + pitch correction
     """
-    equirect = imgs[0]["img"]
     return {
         "id": f"panorama_{idx}",
         "name": f"Panorama {idx} (spherical, {imgs[0]['w']}x{imgs[0]['h']})",
         "position": pos,
         "rotation": quat,
         "type": "spherical",
-        "equirect": equirect,
+        "equirect": None,
         "faces": None,
+        "jpeg_bytes": imgs[0]["jpeg_bytes"],
+        "image_size": (imgs[0]["w"], imgs[0]["h"]),
+        "face_bytes": None,
         "color": PANORAMA_LAYER_COLOR,
         "opacity": PANORAMA_LAYER_OPACITY,
     }
@@ -326,7 +329,7 @@ def _build_cubemap_station(idx, imgs, pos, quat) -> dict:
       1. Sort faces by quaternion look-direction into standard slots
       2. Z-axis slots swapped to correct pinhole vertical inversion
     """
-    sorted_faces = _sort_cubemap_faces(imgs)
+    sorted_face_bytes = _sort_cubemap_faces(imgs)
     return {
         "id": f"panorama_{idx}",
         "name": f"Panorama {idx} (cubemap, {len(imgs)} faces)",
@@ -334,7 +337,10 @@ def _build_cubemap_station(idx, imgs, pos, quat) -> dict:
         "rotation": quat,
         "type": "cubemap",
         "equirect": None,
-        "faces": sorted_faces,
+        "faces": None,
+        "jpeg_bytes": None,
+        "image_size": None,
+        "face_bytes": sorted_face_bytes,
         "color": PANORAMA_LAYER_COLOR,
         "opacity": PANORAMA_LAYER_OPACITY,
     }
@@ -345,15 +351,17 @@ def _build_cylindrical_station(idx, imgs, pos, quat) -> dict:
 
     Processing (now handled in parallel _process_image_task).
     """
-    equirect = imgs[0]["img"]
     return {
         "id": f"panorama_{idx}",
         "name": f"Panorama {idx} (cylindrical, {imgs[0]['w']}x{imgs[0]['h']})",
         "position": pos,
         "rotation": quat,
         "type": "cylindrical",
-        "equirect": equirect,
+        "equirect": None,
         "faces": None,
+        "jpeg_bytes": imgs[0]["jpeg_bytes"],
+        "image_size": (imgs[0]["w"], imgs[0]["h"]),
+        "face_bytes": None,
         "color": PANORAMA_LAYER_COLOR,
         "opacity": PANORAMA_LAYER_OPACITY,
     }
@@ -367,15 +375,17 @@ def _build_visual_ref_station(idx, imgs, pos, quat) -> dict:
     purposes — they'll appear stretched on the sphere but still
     provide useful context.
     """
-    equirect = imgs[0]["img"]
     return {
         "id": f"panorama_{idx}",
         "name": f"Panorama {idx} (visual ref, {imgs[0]['w']}x{imgs[0]['h']})",
         "position": pos,
         "rotation": quat,
         "type": "visual_ref",
-        "equirect": equirect,
+        "equirect": None,
         "faces": None,
+        "jpeg_bytes": imgs[0]["jpeg_bytes"],
+        "image_size": (imgs[0]["w"], imgs[0]["h"]),
+        "face_bytes": None,
         "color": PANORAMA_LAYER_COLOR,
         "opacity": PANORAMA_LAYER_OPACITY,
     }
@@ -527,13 +537,13 @@ def _sort_cubemap_faces(imgs: list) -> list:
         else:
             slot = axis * 2 + (0 if sign > 0 else 1)
         if sorted_faces[slot] is None:
-            sorted_faces[slot] = d["img"]
+            sorted_faces[slot] = d["jpeg_bytes"]
 
     # Fallback: fill missing slots from original order
     orig_idx = 0
     for s in range(6):
         if sorted_faces[s] is None and orig_idx < len(imgs):
-            sorted_faces[s] = imgs[orig_idx]["img"]
+            sorted_faces[s] = imgs[orig_idx]["jpeg_bytes"]
             orig_idx += 1
 
     return sorted_faces

@@ -25,6 +25,9 @@ class LayerData:
         self.pano_faces: Optional[list] = None             # list of 6 PIL Images (cubemap)
         self.pano_type: Optional[str] = None               # "cubemap" or "spherical"
         self.pano_equirect: Optional[object] = None        # PIL equirect image
+        self.pano_jpeg_bytes: Optional[bytes] = None       # compressed JPEG bytes
+        self.pano_image_size: Optional[tuple] = None       # (w, h) pixel dimensions
+        self.pano_face_bytes: Optional[list] = None        # per-face JPEG bytes (cubemap)
 
         # Geometry arrays
         self.points: Optional[np.ndarray] = None       # Nx3 float32
