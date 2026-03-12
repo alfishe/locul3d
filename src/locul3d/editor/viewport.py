@@ -85,19 +85,43 @@ class EditorViewport(BaseGLViewport):
         """Paint editor viewport with annotations overlay."""
         super()._paintGL_inner()
 
-        # Save GL matrices for hit testing (after scene correction is applied)
-        from OpenGL.GL import glGetFloatv, glGetIntegerv, GL_MODELVIEW_MATRIX, GL_PROJECTION_MATRIX, GL_VIEWPORT
-        self._gl_modelview = np.array(glGetFloatv(GL_MODELVIEW_MATRIX), dtype=np.float64)
+        # Annotations and gizmos live in world (global) coordinates.
+        # Render them using the pre-correction modelview matrix so the
+        # GL scene correction does NOT apply a second time.
+        from OpenGL.GL import (glGetFloatv, glGetIntegerv, glPushMatrix,
+                               glPopMatrix, glLoadMatrixf,
+                               GL_MODELVIEW_MATRIX, GL_PROJECTION_MATRIX, GL_VIEWPORT)
+
+        pre_corr = getattr(self, '_pre_correction_matrix', None)
+
+        # For hit testing we need the world-space (pre-correction) matrices
+        # since bboxes are now in world coordinates.
+        if pre_corr is not None:
+            self._gl_modelview = np.array(pre_corr, dtype=np.float64)
+        else:
+            self._gl_modelview = np.array(glGetFloatv(GL_MODELVIEW_MATRIX), dtype=np.float64)
         self._gl_projection = np.array(glGetFloatv(GL_PROJECTION_MATRIX), dtype=np.float64)
         self._gl_viewport = glGetIntegerv(GL_VIEWPORT)
 
-        # Draw annotations
+        # Switch to world-space matrix for annotation rendering
+        if pre_corr is not None:
+            glPushMatrix()
+            glLoadMatrixf(pre_corr)
+
+        # Draw annotations (bboxes are in world coordinates)
         self._draw_annotations()
 
         # Draw gizmo for selected bbox (move arrows + scale handles + rotation ring)
         if self.selected_idx >= 0 and self.selected_idx < len(self.annotations):
             bbox = self.annotations[self.selected_idx]
             self._draw_gizmo(bbox)
+
+        # Draw reference point (in world space)
+        if self.ref_point is not None:
+            self._draw_ref_point()
+
+        if pre_corr is not None:
+            glPopMatrix()
 
         # Scene-coord planes: drawn inside correction (already active)
         scene_planes = [p for p in self.planes if p.visible and not p.global_coords]
@@ -106,16 +130,11 @@ class EditorViewport(BaseGLViewport):
 
         # Global-coord planes: drawn after scene using saved pre-correction matrix
         global_planes = [p for p in self.planes if p.visible and p.global_coords]
-        if global_planes and hasattr(self, '_pre_correction_matrix'):
+        if global_planes and pre_corr is not None:
             glPushMatrix()
-            from OpenGL.GL import glLoadMatrixf
-            glLoadMatrixf(self._pre_correction_matrix)
+            glLoadMatrixf(pre_corr)
             self._draw_planes(global_planes)
             glPopMatrix()
-
-        # Draw reference point
-        if self.ref_point is not None:
-            self._draw_ref_point()
 
     def _draw_annotations(self):
         """Draw bounding box annotations (wireframe + optional filled faces)."""

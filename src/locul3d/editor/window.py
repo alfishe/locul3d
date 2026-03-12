@@ -514,7 +514,7 @@ class EditorWindow(QMainWindow):
         """Show file dialog to open one or more 3D files.
 
         E57 files are routed through the full import pipeline with progress.
-        Auto-detects correction sidecar for the first opened file.
+        Sidecar detection is handled by _import_e57_file / _load_file.
         """
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Open Files", "", "3D Files (*.ply *.obj *.stl *.e57);;All Files (*)"
@@ -524,9 +524,6 @@ class EditorWindow(QMainWindow):
                 self._import_e57_file(p)
             else:
                 self._load_file(p)
-        # Auto-detect sidecar for first opened file
-        if paths:
-            self._try_load_sidecar(paths[0])
 
     def _on_open_folder(self):
         """Show folder dialog and load all supported files from selected directory."""
@@ -577,6 +574,8 @@ class EditorWindow(QMainWindow):
                 f"Imported E57: {n_layers} layers, {total_pts:,} points"
             )
             self._post_load()
+            # Auto-detect project YAML / correction sidecar next to the E57
+            self._try_load_sidecar(path)
 
     def _load_file(self, path: str, fit_camera: bool = True):
         """Load a single geometry file as a new layer.
@@ -856,8 +855,20 @@ class EditorWindow(QMainWindow):
                 "shift_z": round(corr.shift_z, 4),
             }
         # Annotations
+        # Bboxes are stored internally in world (global) coordinates.
+        # For YAML persistence, inverse-transform back to scene (scanner-local)
+        # coordinates so the file format stays in the original coordinate system.
         if self.annotations:
-            data["bboxes"] = [b.to_dict() for b in self.annotations]
+            save_bboxes = []
+            for b in self.annotations:
+                if corr is not None and not corr.is_identity:
+                    import copy
+                    b_copy = copy.deepcopy(b)
+                    b_copy.center_pos = corr.inverse_transform_point(b.center_pos)
+                    save_bboxes.append(b_copy.to_dict())
+                else:
+                    save_bboxes.append(b.to_dict())
+            data["bboxes"] = save_bboxes
         if self.planes:
             data["planes"] = [p.to_dict() for p in self.planes]
         if self._ref_point is not None:
@@ -937,6 +948,14 @@ class EditorWindow(QMainWindow):
                 corr.shift_z = cli["shift_z"]
             self.gl_viewport.scene_correction = corr
             self.gl_viewport.update()
+        # --- Transform bboxes from scene → world coordinates ---
+        # Project YAML stores bboxes in original (scene/scanner-local) coords.
+        # Transform them to the target (world/global) coordinate system so
+        # they are ALWAYS rendered and interacted with in world space.
+        corr = self.gl_viewport.scene_correction
+        if corr is not None and not corr.is_identity and self.annotations:
+            for bbox in self.annotations:
+                bbox.center_pos = corr.transform_point(bbox.center_pos)
         # --- UI update ---
         self._yaml_path = path
         self.bbox_panel.rebuild_list()
