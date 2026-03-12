@@ -116,6 +116,42 @@ class SceneCorrection:
         p[2] += self.shift_z
         return p
 
+    def inverse_transform_point(self, point) -> "np.ndarray":
+        """Apply the INVERSE of the correction transform to a 3D point.
+
+        Converts a world-coordinate point back to scene coordinates.
+        Order (reverse of forward): un-shift first, then rotate in reverse order
+        (Rz⁻¹ → Ry⁻¹ → Rx⁻¹).
+        """
+        import numpy as np
+        p = np.array(point, dtype=np.float64).copy()
+        # Un-shift first (reverse of: shift last)
+        p[0] -= self.shift_x
+        p[1] -= self.shift_y
+        p[2] -= self.shift_z
+        # Un-rotate Z (reverse sign)
+        if self.rotate_z != 0:
+            rad = np.radians(-self.rotate_z)
+            c, s = np.cos(rad), np.sin(rad)
+            x, y = p[0], p[1]
+            p[0] = c * x - s * y
+            p[1] = s * x + c * y
+        # Un-rotate Y (reverse sign)
+        if self.rotate_y != 0:
+            rad = np.radians(-self.rotate_y)
+            c, s = np.cos(rad), np.sin(rad)
+            x, z = p[0], p[2]
+            p[0] = c * x + s * z
+            p[2] = -s * x + c * z
+        # Un-rotate X (reverse sign)
+        if self.rotate_x != 0:
+            rad = np.radians(-self.rotate_x)
+            c, s = np.cos(rad), np.sin(rad)
+            y, z = p[1], p[2]
+            p[1] = c * y - s * z
+            p[2] = s * y + c * z
+        return p
+
     def as_dict(self) -> dict:
         return {
             "correction": {
