@@ -14,7 +14,9 @@ geometry        UV sphere mesh generation (pure function)
 
 from __future__ import annotations
 
+import io
 import math
+from collections import OrderedDict
 from typing import Optional, Callable, List
 
 import numpy as np
@@ -31,8 +33,11 @@ class PanoramaManager:
     through it — no panorama logic lives in the viewport itself.
     """
 
+    _LRU_MAX: int = 3
+
     def __init__(self):
         self._renderer = ImmersiveRenderer()
+        self._decoded_lru: OrderedDict = OrderedDict()
         # Immersive camera state
         self._pano_yaw: float = 0.0
         self._pano_pitch: float = 0.0
@@ -242,12 +247,36 @@ class PanoramaManager:
             distance, azimuth, elevation, target, fov.
         """
         equirect = layer.pano_equirect
+
+        if equirect is None and layer.pano_face_bytes:
+            try:
+                self._decode_faces(layer)
+                equirect = self._assemble_equirect(layer.pano_faces)
+                layer.pano_equirect = equirect
+                layer.pano_faces = None
+            except Exception:
+                pass
+
+        if equirect is None and layer.pano_jpeg_bytes:
+            try:
+                self._decode_equirect(layer)
+                equirect = layer.pano_equirect
+            except Exception:
+                pass
+
         if equirect is None and layer.pano_faces:
             equirect = self._assemble_equirect(layer.pano_faces)
-            layer.pano_equirect = equirect  # cache for next time
+            layer.pano_equirect = equirect
 
         if equirect is None:
             return
+
+        lid = layer.id
+        if lid in self._decoded_lru:
+            self._decoded_lru.move_to_end(lid)
+        else:
+            self._decoded_lru[lid] = layer
+            self._evict_lru()
 
         self._saved_camera = camera_state
         self._active_layer = layer
@@ -263,6 +292,43 @@ class PanoramaManager:
         saved = self._saved_camera
         self._saved_camera = {}
         return saved
+
+    def _decode_equirect(self, layer) -> None:
+        from PIL import Image as PILImage
+
+        jpeg_bytes = layer.pano_jpeg_bytes
+        if jpeg_bytes is None:
+            return
+        pil_img = PILImage.open(io.BytesIO(jpeg_bytes))
+        pil_img.load()
+        if layer.pano_type in ("spherical", "cylindrical"):
+            pil_img = pil_img.transpose(PILImage.FLIP_LEFT_RIGHT)
+        layer.pano_equirect = pil_img
+
+    def _decode_faces(self, layer) -> None:
+        from PIL import Image as PILImage
+
+        face_bytes = layer.pano_face_bytes
+        if face_bytes is None:
+            return
+        faces = []
+        for fb in face_bytes:
+            if fb is None:
+                faces.append(None)
+            else:
+                img = PILImage.open(io.BytesIO(fb))
+                img.load()
+                faces.append(img)
+        layer.pano_faces = faces
+
+    def _evict_lru(self) -> None:
+        while len(self._decoded_lru) > self._LRU_MAX:
+            oldest_id, old_layer = self._decoded_lru.popitem(last=False)
+            if old_layer is self._active_layer:
+                self._decoded_lru[oldest_id] = old_layer
+                break
+            old_layer.pano_equirect = None
+            old_layer.pano_faces = None
 
     def _get_station_rotation(self):
         """Get station quaternion for GL rotation (spherical/cylindrical only).
