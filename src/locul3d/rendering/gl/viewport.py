@@ -708,7 +708,9 @@ class BaseGLViewport(QOpenGLWidget):
         glDisable(GL_LIGHTING)
         glLineWidth(2.0)
         length = self._scene_radius * 0.15 if self._scene_radius > 0 else 1.0
+        
         glBegin(GL_LINES)
+        # Main axes
         glColor3f(0.9, 0.2, 0.2)
         glVertex3f(0, 0, 0)
         glVertex3f(length, 0, 0)
@@ -718,6 +720,36 @@ class BaseGLViewport(QOpenGLWidget):
         glColor3f(0.2, 0.2, 0.9)
         glVertex3f(0, 0, 0)
         glVertex3f(0, 0, length)
+        
+        # Labels
+        d = length * 0.08
+        s = length * 0.04
+
+        # X label
+        glColor3f(0.9, 0.2, 0.2)
+        glVertex3f(length + d, -s, -s)
+        glVertex3f(length + d, s, s)
+        glVertex3f(length + d, -s, s)
+        glVertex3f(length + d, s, -s)
+
+        # Y label
+        glColor3f(0.2, 0.9, 0.2)
+        glVertex3f(-s, length + d, s)
+        glVertex3f(0, length + d, 0)
+        glVertex3f(s, length + d, s)
+        glVertex3f(0, length + d, 0)
+        glVertex3f(0, length + d, 0)
+        glVertex3f(0, length + d, -s)
+
+        # Z label
+        glColor3f(0.2, 0.2, 0.9)
+        glVertex3f(-s, 0, length + d + s)
+        glVertex3f(s, 0, length + d + s)
+        glVertex3f(s, 0, length + d + s)
+        glVertex3f(-s, 0, length + d - s)
+        glVertex3f(-s, 0, length + d - s)
+        glVertex3f(s, 0, length + d - s)
+        
         glEnd()
         glEnable(GL_LIGHTING)
 
