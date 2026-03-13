@@ -605,8 +605,31 @@ class EditorWindow(QMainWindow):
     def _load_folder(self, folder: str):
         """Load all .ply files from a folder, applying layers.json manifest if present.
 
+        Fully resets internal state before loading so the new folder opens
+        from scratch (not appending to current layers).
         Camera is fitted once after all files load.
         """
+        # --- Full reset ---
+        self.gl_viewport.delete_all_vbos()
+        self.layer_manager.layers.clear()
+        self.layer_manager.invalidate_scene_aabb()
+        self.annotations.clear()
+        self.planes.clear()
+        self._undo_stack.clear()
+        self._yaml_path = None
+        self._color_idx = 0
+        self._plane_color_idx = 0
+        self.gl_viewport.selected_idx = -1
+        self.gl_viewport.scene_correction = SceneCorrection()
+        self.gl_viewport.scene_clip = None
+        self.gl_viewport.set_correction_diagnostics(None)
+        self._ref_point = None
+        self.gl_viewport.ref_point = None
+        self.bbox_panel.rebuild_list()
+        self.plane_panel.rebuild_list()
+        self.info_panel.clear()
+
+        # --- Load new folder ---
         folder_path = Path(folder)
         ply_files = sorted(folder_path.glob("*.ply"))
         for p in ply_files:
@@ -634,6 +657,7 @@ class EditorWindow(QMainWindow):
         self.gl_viewport.fit_to_scene()
         self._post_load()
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
+        self.setWindowTitle(f"Locul3D Editor — {folder_path.name}")
 
     # ------------------------------------------------------------------
     # BBox operations
