@@ -436,11 +436,31 @@ class ViewerWindow(QMainWindow):
     def _load_folder(self, folder: str):
         """Load all geometry files from a folder.
 
+        Fully resets internal state before loading so the new folder opens
+        from scratch (not appending to current layers).
+
         Scans for .ply, .obj, .stl files and loads them without fitting camera
         per file.  E57 files are routed through the import pipeline.
         If a layers.json manifest exists, layer colors/names/visibility are
         applied from it.  Camera is fitted once after all files load.
         """
+        # --- Full reset ---
+        self.viewport.delete_all_vbos()
+        self.layer_manager.layers.clear()
+        self.layer_manager.invalidate_scene_aabb()
+        self.viewport.scene_correction = SceneCorrection()
+        self.viewport.scene_clip = None
+        self._selected_layer = None
+        self.info_panel.clear()
+
+        # Exit panorama mode if active
+        if (hasattr(self.viewport, '_panorama')
+                and self.viewport._panorama
+                and self.viewport._panorama.is_active):
+            self.viewport.exit_panorama()
+            self.layer_panel.highlight_active_pano(None)
+
+        # --- Load new folder ---
         folder_path = Path(folder)
         for ext in ("*.ply", "*.obj", "*.stl"):
             for p in sorted(folder_path.glob(ext)):
@@ -473,6 +493,7 @@ class ViewerWindow(QMainWindow):
         self.viewport.fit_to_scene()
         self._post_load()
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
+        self.setWindowTitle(f"Locul3D Viewer — {folder_path.name}")
 
     # ------------------------------------------------------------------
     # View controls
