@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Locul3D — The Place in 3D. A modular point cloud viewer and annotation editor."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.9, <3.13"
 authors = [
     {name = "Locul3D"},
 ]
