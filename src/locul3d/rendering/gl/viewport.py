@@ -98,6 +98,7 @@ class BaseGLViewport(QOpenGLWidget):
             False  # True = WASD/QE moves camera; False = scene correction
         )
         self.fps_camera = False  # True = first-person camera (cam_distance=0)
+        self.point_attenuation = False  # True = perspective-correct 1/d point size falloff
         self._saved_cam_distance = None  # orbital distance saved when entering FPS
         self._fps_movement_was_manual = (
             False  # track if user had fps_movement on before fps_camera
@@ -499,15 +500,16 @@ class BaseGLViewport(QOpenGLWidget):
             zoom_scale = max(1.0, min(zoom_ratio, 10.0))
             base_size *= zoom_scale
 
-        # Perspective-correct point size: OpenGL's distance attenuation scales
-        # each point as  effective_px = base_size * sqrt(1/(a + b*d + c*d²)).
-        # With a=0, b=0, c=1/ref_d²  this gives  effective_px = base_size/d * ref_d,
-        # i.e. a 1/d falloff anchored so that a point at cam_distance gets base_size px.
-        ref_d = max(self.cam_distance, 0.5)
-        c_att = 1.0 / (ref_d * ref_d)
-        glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, [0.0, 0.0, c_att])
-        glPointParameterf(GL_POINT_SIZE_MIN, 0.5)
-        glPointParameterf(GL_POINT_SIZE_MAX, 128.0)
+        if self.point_attenuation:
+            # Perspective-correct point size: OpenGL's distance attenuation scales
+            # each point as  effective_px = base_size * sqrt(1/(a + b*d + c*d²)).
+            # With a=0, b=0, c=1/ref_d²  this gives  effective_px = base_size/d * ref_d,
+            # i.e. a 1/d falloff anchored so that a point at cam_distance gets base_size px.
+            ref_d = max(self.cam_distance, 0.5)
+            c_att = 1.0 / (ref_d * ref_d)
+            glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, [0.0, 0.0, c_att])
+            glPointParameterf(GL_POINT_SIZE_MIN, 0.5)
+            glPointParameterf(GL_POINT_SIZE_MAX, 128.0)
 
         glPointSize(base_size)
 
@@ -592,8 +594,9 @@ class BaseGLViewport(QOpenGLWidget):
         glDisableClientState(GL_VERTEX_ARRAY)
         glDisableClientState(GL_COLOR_ARRAY)
 
-        # Reset to flat (non-attenuated) point sizes for other rendering
-        glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, [1.0, 0.0, 0.0])
+        if self.point_attenuation:
+            # Reset to flat (non-attenuated) point sizes for other rendering
+            glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, [1.0, 0.0, 0.0])
 
         if render_on_top:
             glEnable(GL_DEPTH_TEST)
