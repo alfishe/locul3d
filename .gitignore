@@ -22,3 +22,4 @@ Thumbs.db
 .env
 .venv
 venv/
+.claude/settings.local.json

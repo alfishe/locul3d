@@ -191,7 +191,7 @@ class ViewerWindow(QMainWindow):
         # Point size
         toolbar.addWidget(QLabel("  Pt:"))
         self.pt_slider = QSlider(Qt.Orientation.Horizontal)
-        self.pt_slider.setRange(1, 20)
+        self.pt_slider.setRange(1, 10)
         self.pt_slider.setValue(2)
         self.pt_slider.setFixedWidth(80)
         self.pt_slider.valueChanged.connect(self._on_point_size)
