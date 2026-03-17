@@ -357,6 +357,14 @@ class EditorWindow(QMainWindow):
         )
         self.act_fps_camera.triggered.connect(self._on_fps_camera_toggled)
         exp_menu.addAction(self.act_fps_camera)
+        self.act_pt_attenuation = QAction("Perspective Point Attenuation", self, checkable=True)
+        self.act_pt_attenuation.setToolTip(
+            "Scale point size by 1/distance so points shrink naturally as camera moves away"
+        )
+        self.act_pt_attenuation.triggered.connect(
+            lambda c: self._toggle_view("point_attenuation", c)
+        )
+        exp_menu.addAction(self.act_pt_attenuation)
         exp_btn.setMenu(exp_menu)
         toolbar.addWidget(exp_btn)
 
