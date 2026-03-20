@@ -99,6 +99,7 @@ class BaseGLViewport(QOpenGLWidget):
         )
         self.fps_camera = False  # True = first-person camera (cam_distance=0)
         self.point_attenuation = False  # True = perspective-correct 1/d point size falloff
+        self.auto_scale_small_points = True  # True = enlarge points for small/sparse layers
         self._saved_cam_distance = None  # orbital distance saved when entering FPS
         self._fps_movement_was_manual = (
             False  # track if user had fps_movement on before fps_camera
@@ -484,14 +485,15 @@ class BaseGLViewport(QOpenGLWidget):
         glDisable(GL_LIGHTING)
 
         # Use larger point size for small point clouds (better visibility)
-        if layer.point_count < 10000:
+        if self.auto_scale_small_points and layer.point_count < 10000:
             base_size = self.point_size * 2.5
         else:
             base_size = self.point_size
 
         # Scale point size with zoom only for sparse layers (<100k pts)
         if (
-            layer.point_count < 100000
+            self.auto_scale_small_points
+            and layer.point_count < 100000
             and layer.id != "raw_scan"
             and self._scene_radius > 0
         ):
@@ -514,7 +516,7 @@ class BaseGLViewport(QOpenGLWidget):
         glPointSize(base_size)
 
         # Disable depth test for small point clouds
-        render_on_top = layer.point_count < 10000
+        render_on_top = self.auto_scale_small_points and layer.point_count < 10000
         if render_on_top:
             glDisable(GL_DEPTH_TEST)
 
