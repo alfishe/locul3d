@@ -254,6 +254,16 @@ class ViewerWindow(QMainWindow):
             lambda c: self._toggle_view("point_attenuation", c)
         )
         exp_menu.addAction(self.act_pt_attenuation)
+        self.act_auto_scale = QAction(
+            "Auto-Scale Small Points", self, checkable=True, checked=True
+        )
+        self.act_auto_scale.setToolTip(
+            "Automatically enlarge points for small/sparse layers (disable for uniform size)"
+        )
+        self.act_auto_scale.triggered.connect(
+            lambda c: self._toggle_view("auto_scale_small_points", c)
+        )
+        exp_menu.addAction(self.act_auto_scale)
         exp_btn.setMenu(exp_menu)
         toolbar.addWidget(exp_btn)
 
