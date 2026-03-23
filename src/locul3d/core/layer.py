@@ -399,22 +399,45 @@ class LayerManager:
         self.invalidate_scene_aabb()
 
     def get_scene_bounds(self):
-        """Compute union bounding sphere across all loaded layers."""
+        """Compute union bounding sphere across all loaded layers using cached AABBs."""
         global_min = None
         global_max = None
+        
         for layer in self.layers:
-            for pts in (layer.points, layer.line_points):
-                if pts is not None and len(pts) > 0:
-                    lmin = pts.min(axis=0)
-                    lmax = pts.max(axis=0)
-                    if global_min is None:
-                        global_min = lmin
-                        global_max = lmax
-                    else:
-                        np.minimum(global_min, lmin, out=global_min)
-                        np.maximum(global_max, lmax, out=global_max)
+            if not layer.visible or not layer.loaded:
+                continue
+                
+            # Use cached AABB if available
+            lmin, lmax = getattr(layer, '_aabb_min', None), getattr(layer, '_aabb_max', None)
+            
+            # If not cached, calculate it once and store it
+            if lmin is None or lmax is None:
+                for pts in (layer.points, layer.line_points):
+                    if pts is not None and len(pts) > 0:
+                        # For very large layers (>1M pts), use a subsample for bounds calculation
+                        # to keep the UI responsive. The error is negligible for camera fitting.
+                        if len(pts) > 1_000_000:
+                            sample = pts[::max(1, len(pts) // 1_000_000)]
+                            lmin = sample.min(axis=0)
+                            lmax = sample.max(axis=0)
+                        else:
+                            lmin = pts.min(axis=0)
+                            lmax = pts.max(axis=0)
+                        layer._aabb_min = lmin
+                        layer._aabb_max = lmax
+                        break
+            
+            if lmin is not None:
+                if global_min is None:
+                    global_min = lmin.copy()
+                    global_max = lmax.copy()
+                else:
+                    np.minimum(global_min, lmin, out=global_min)
+                    np.maximum(global_max, lmax, out=global_max)
+                    
         if global_min is None:
             return np.zeros(3), 10.0
+            
         center = (global_min + global_max) / 2.0
         radius = float(np.linalg.norm(global_max - global_min) / 2.0)
         return center, max(radius, 1.0)
