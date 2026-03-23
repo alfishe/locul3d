@@ -387,8 +387,7 @@ class E57ImportWorker(QThread):
     def _fast_binary_read(self, path, n, has_rgb, field_names):
         """Vectorized E57 binary reader -- bypasses libE57Format codec.
 
-        E57 structure (confirmed across Leica BLK360G2, BLK2GO, ARC,
-        NavVis, and synthetic files):
+        E57 structure:
           Physical offset 0:  48-byte file header
           Physical offset 48: CompressedVector section header (16 bytes)
           Logical offset  64: 16-byte section index entry
@@ -420,15 +419,27 @@ class E57ImportWorker(QThread):
         xml_phys_off = struct.unpack_from('<Q', raw_hdr, 24)[0]
         xml_phys_len = struct.unpack_from('<Q', raw_hdr, 32)[0]
 
-        # 2. Read entire file as uint8 and strip CRC pages
+        # 2. Read entire file and strip CRC pages.
+        #    Prefer memmap to avoid double-allocation and hit max throughput,
+        #    but fall back to fromfile for robust cross-platform support
+        #    (e.g., restricted network shares or certain Windows environments).
         t0 = time.time()
-        raw_arr = np.fromfile(path, dtype=np.uint8)
+        try:
+            raw_arr = np.memmap(path, dtype=np.uint8, mode='r')
+            is_memmap = True
+        except (OSError, ValueError):
+            raw_arr = np.fromfile(path, dtype=np.uint8)
+            is_memmap = False
+
         n_pages = len(raw_arr) // PAGE_SIZE
         pages = raw_arr[:n_pages * PAGE_SIZE].reshape(n_pages, PAGE_SIZE)
         logical = np.ascontiguousarray(pages[:, :DATA_PER_PAGE]).ravel()
         t_read = time.time() - t0
-        self._log(f"File read+CRC strip: {t_read:.2f}s "
+        mode_str = "memmap" if is_memmap else "fromfile"
+        self._log(f"File load ({mode_str})+CRC strip: {t_read:.2f}s "
                   f"({len(raw_arr) / 1024**2 / t_read:.0f} MB/s)")
+
+        # Explicitly release the memmap/buffer handle
         del raw_arr, pages
         gc.collect()
 
@@ -474,29 +485,53 @@ class E57ImportWorker(QThread):
         x_off = pkt_header + sum(bslens[:x_idx])
         y_off = pkt_header + sum(bslens[:y_idx])
         z_off = pkt_header + sum(bslens[:z_idx])
+        stream_len = bslens[x_idx]
 
         t0 = time.time()
-        pkt_view = logical[first_pkt_log : first_pkt_log + n_pkts * pkt_size]
-        pkt_view = pkt_view.reshape(n_pkts, pkt_size)
+        # Create a view into the logical packets
+        pkt_bytes_needed = n_pkts * pkt_size
+        pkt_view = logical[first_pkt_log : first_pkt_log + pkt_bytes_needed].reshape(n_pkts, pkt_size)
 
+        # Allocate final arrays
         xyz = np.empty((n_full, 3), dtype=np.float32)
-        xyz[:, 0] = pkt_view[:, x_off : x_off + bslens[x_idx]].ravel().view(np.float32)
-        xyz[:, 1] = pkt_view[:, y_off : y_off + bslens[y_idx]].ravel().view(np.float32)
-        xyz[:, 2] = pkt_view[:, z_off : z_off + bslens[z_idx]].ravel().view(np.float32)
-
+        r_off = g_off = b_off = -1
         colors_u8 = None
         if has_rgb:
             r_off = pkt_header + sum(bslens[:r_idx])
             g_off = pkt_header + sum(bslens[:g_idx])
             b_off = pkt_header + sum(bslens[:b_idx])
             colors_u8 = np.empty((n_full, 3), dtype=np.uint8)
-            colors_u8[:, 0] = pkt_view[:, r_off : r_off + bslens[r_idx]].ravel()
-            colors_u8[:, 1] = pkt_view[:, g_off : g_off + bslens[g_idx]].ravel()
-            colors_u8[:, 2] = pkt_view[:, b_off : b_off + bslens[b_idx]].ravel()
-        del pkt_view
 
+        # Parallelize the extraction to bypass single-threaded memory bottlenecks
+        from concurrent.futures import ThreadPoolExecutor
+        num_workers = 8
+        chunk_pkts  = n_pkts // num_workers
+
+        def _extract_chunk(i):
+            start_p = i * chunk_pkts
+            end_p = (i + 1) * chunk_pkts if i < num_workers - 1 else n_pkts
+            if start_p >= end_p: return
+            
+            p_slice = pkt_view[start_p:end_p]
+            pts_start, pts_end = start_p * pts_per_pkt, end_p * pts_per_pkt
+            
+            # Cartesian X, Y, Z
+            xyz[pts_start:pts_end, 0] = p_slice[:, x_off : x_off + stream_len].ravel().view(np.float32)
+            xyz[pts_start:pts_end, 1] = p_slice[:, y_off : y_off + stream_len].ravel().view(np.float32)
+            xyz[pts_start:pts_end, 2] = p_slice[:, z_off : z_off + stream_len].ravel().view(np.float32)
+            
+            # Colors
+            if colors_u8 is not None:
+                colors_u8[pts_start:pts_end, 0] = p_slice[:, r_off : r_off + pts_per_pkt].ravel()
+                colors_u8[pts_start:pts_end, 1] = p_slice[:, g_off : g_off + pts_per_pkt].ravel()
+                colors_u8[pts_start:pts_end, 2] = p_slice[:, b_off : b_off + pts_per_pkt].ravel()
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            list(executor.map(_extract_chunk, range(num_workers)))
+
+        del pkt_view, logical
         t_parse = time.time() - t0
-        self._log(f"Binary parse: {t_parse:.1f}s ({n_full / t_parse / 1e6:.1f}M pts/s)")
+        self._log(f"Parallel parse: {t_parse:.2f}s ({n_full / t_parse / 1e6:.1f} Mpts/s)")
         gc.collect()
         return xyz, colors_u8
     # ------------------------------------------------------------------
