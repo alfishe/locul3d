@@ -1,4 +1,4 @@
-"""E57 file importer — full processing pipeline (first-class citizen).
+"""E57 file importer -- full processing pipeline (first-class citizen).
 
 This module provides:
   - E57ImportResult: container for pipeline output
@@ -89,9 +89,9 @@ E57_MAX_PLANES = 15
 E57_CROP_RADIUS = None             # None = load all points
 
 # Scenes with more points than this skip the raw_scan layer to save
-# RAM.  348M pts × 24 bytes ≈ 7.8 GB — holding that in memory alongside
+# RAM.  348M pts × 24 bytes ≈ 7.8 GB -- holding that in memory alongside
 # the aligned + decimated copies is wasteful for interactive use.
-E57_RAW_LAYER_POINT_THRESHOLD = 50_000_000  # 50M — skip raw layer above this
+E57_RAW_LAYER_POINT_THRESHOLD = 50_000_000  # 50M -- skip raw layer above this
 
 E57_SURFACE_COLORS = [
     [0.90, 0.10, 0.10], [0.10, 0.80, 0.10], [0.10, 0.10, 0.90],
@@ -178,7 +178,7 @@ class E57ImportWorker(QThread):
         stats = {}
         t_total = time.time()
 
-        # Stage 1: Ingest — returns raw numpy arrays (float32 + uint8)
+        # Stage 1: Ingest -- returns raw numpy arrays (float32 + uint8)
         self.stage_started.emit("Ingestion", "Reading E57 file...")
         t0 = time.time()
         xyz, colors_u8, meta = self._stage_ingest()
@@ -265,9 +265,12 @@ class E57ImportWorker(QThread):
         gc.collect()
 
         # Panorama extraction
+        t_pano = time.time()
+        self.stage_started.emit("Panoramas", "Extracting images...")
         pano_layers = self._extract_panoramas(self._path)
         self._align_panorama_layers(pano_layers)
         layers.extend(pano_layers)
+        self._log(f"Panorama extraction: {time.time() - t_pano:.2f}s")
 
         stats["total_time"] = time.time() - t_total
         stats["surfaces"] = []
@@ -278,7 +281,7 @@ class E57ImportWorker(QThread):
         return result
 
     # ------------------------------------------------------------------
-    # Stage 1: Ingestion — fast binary E57 reader + libe57 fallback
+    # Stage 1: Ingestion -- fast binary E57 reader + libe57 fallback
     # ------------------------------------------------------------------
 
     def _stage_ingest(self):
@@ -294,7 +297,7 @@ class E57ImportWorker(QThread):
         file_size_mb = os.path.getsize(path) / 1024 / 1024
         self._log(f"File: {Path(path).name} ({file_size_mb:.1f} MB)")
 
-        # Read header & metadata via pye57 (fast — just XML)
+        # Read header & metadata via pye57 (fast -- just XML)
         e57 = pye57.E57(path)
         header = e57.get_header(0)
         n = header.point_count
@@ -324,7 +327,7 @@ class E57ImportWorker(QThread):
         # --- Try fast binary path ---
         xyz, colors_u8 = None, None
         try:
-            xyz, colors_u8 = self._fast_binary_read(path, n, has_rgb)
+            xyz, colors_u8 = self._fast_binary_read(path, n, has_rgb, header.point_fields)
         except Exception as exc:
             self._log(f"Fast binary read failed ({exc}), "
                       "falling back to libe57")
@@ -381,165 +384,126 @@ class E57ImportWorker(QThread):
         self.stage_progress.emit("Done", 100)
         return xyz, colors_u8, meta
 
-    # ------------------------------------------------------------------
-    # Fast binary E57 reader — bypasses libE57Format codec
-    # ------------------------------------------------------------------
+    def _fast_binary_read(self, path, n, has_rgb, field_names):
+        """Vectorized E57 binary reader -- bypasses libE57Format codec.
 
-    def _fast_binary_read(self, path, n, has_rgb):
-        """Read E57 data packets directly via numpy.
+        E57 structure (confirmed across Leica BLK360G2, BLK2GO, ARC,
+        NavVis, and synthetic files):
+          Physical offset 0:  48-byte file header
+          Physical offset 48: CompressedVector section header (16 bytes)
+          Logical offset  64: 16-byte section index entry
+          Logical offset  80: First data packet (type=1, always here)
 
-        E57 files store data in CRC-protected 1024-byte pages.  Each
-        page has 1020 data bytes + 4-byte CRC.  Data is organized as
-        CompressedVector packets with per-field bytestreams.
-
-        For uncompressed E57 files (float32 XYZ + uint8 RGB, ~1:1
-        compression ratio), we can read 4× faster than libE57Format
-        by stripping CRC pages and extracting packets vectorized.
-
-        Raises ValueError if the packet structure is non-standard.
+        The first data packet is always at logical offset (cv_log + 32),
+        where cv_log is the physical-to-logical conversion of the CV fileOffset
+        from the XML (universally 48 across all tested files → cv_log = 48).
         """
-        import struct
-        import gc
+        import gc, struct
 
         PAGE_SIZE = 1024
         DATA_PER_PAGE = 1020
 
-        # 1. Read entire file (SSD-speed, ~0.8s for 5GB)
-        t0 = time.time()
-        with open(path, 'rb') as f:
-            raw_arr = np.fromfile(f, dtype=np.uint8)
-        self._log(f"File read: {time.time() - t0:.2f}s "
-                  f"({len(raw_arr) / (time.time() - t0) / 1024**3:.1f} GB/s)")
+        # Map field names to stream indices
+        try:
+            x_idx = field_names.index('cartesianX')
+            y_idx = field_names.index('cartesianY')
+            z_idx = field_names.index('cartesianZ')
+            r_idx = field_names.index('colorRed') if has_rgb else -1
+            g_idx = field_names.index('colorGreen') if has_rgb else -1
+            b_idx = field_names.index('colorBlue') if has_rgb else -1
+        except (ValueError, AttributeError):
+            raise ValueError("Required fields not found in stream map")
 
-        # 2. Strip CRC pages (numpy reshape + slice, ~0.7s)
+        # 1. Read E57 file header (48 physical bytes) to locate the XML
+        with open(path, 'rb') as f:
+            raw_hdr = f.read(48)
+        xml_phys_off = struct.unpack_from('<Q', raw_hdr, 24)[0]
+        xml_phys_len = struct.unpack_from('<Q', raw_hdr, 32)[0]
+
+        # 2. Read entire file as uint8 and strip CRC pages
         t0 = time.time()
+        raw_arr = np.fromfile(path, dtype=np.uint8)
         n_pages = len(raw_arr) // PAGE_SIZE
         pages = raw_arr[:n_pages * PAGE_SIZE].reshape(n_pages, PAGE_SIZE)
         logical = np.ascontiguousarray(pages[:, :DATA_PER_PAGE]).ravel()
-        self._log(f"CRC strip: {time.time() - t0:.2f}s")
+        t_read = time.time() - t0
+        self._log(f"File read+CRC strip: {t_read:.2f}s "
+                  f"({len(raw_arr) / 1024**2 / t_read:.0f} MB/s)")
         del raw_arr, pages
         gc.collect()
 
-        # 3. Probe first data packet to detect structure
-        #    The CompressedVector data section starts at physical
-        #    offset 48 (per XML fileOffset).  The first real data
-        #    packet (type=1, bcount≥6) usually starts at logical 80
-        #    after a small section-index header.
+        # 3. Parse XML (CRC-paged) to find the scan CompressedVector fileOffset
+        xml_page = xml_phys_off // PAGE_SIZE
+        xml_inpg = xml_phys_off % PAGE_SIZE
+        xml_log  = xml_page * DATA_PER_PAGE + xml_inpg
+        xml_bytes = logical[xml_log : xml_log + xml_phys_len].tobytes()
 
-        # Search for first data packet (type=1, bcount≥6, consistent structure)
-        probe_pos = 48
-        pkt0_pos = None
-        while probe_pos < min(len(logical), 8192):
-            if logical[probe_pos] == 1:  # type = data
-                # Read enough for header + bytestream count
-                hdr_raw = logical[probe_pos:probe_pos + 6].tobytes()
-                if len(hdr_raw) < 6:
-                    break
-                _, _, plen_m1, bcount = struct.unpack('<BBHH', hdr_raw)
-                plen = plen_m1 + 1
+        import re
+        m = re.search(rb'fileOffset="(\d+)"', xml_bytes)
+        cv_phys_off = int(m.group(1)) if m else 48  # fallback: 48 is universal
+        cv_page = cv_phys_off // PAGE_SIZE
+        cv_inpg = cv_phys_off % PAGE_SIZE
+        cv_log  = cv_page * DATA_PER_PAGE + cv_inpg
 
-                # Structural verification: plen must be header + sum(bslens)
-                if 6 < bcount < 64 and plen > (6 + bcount * 2):
-                    sl_raw = logical[probe_pos + 6:probe_pos + 6 + bcount * 2].tobytes()
-                    if len(sl_raw) == bcount * 2:
-                        bslens = struct.unpack(f'<{bcount}H', sl_raw)
-                        header_size = 6 + bcount * 2
-                        if sum(bslens) + header_size == plen and bslens[0] > 0:
-                            pkt0_pos = probe_pos
-                            break
-            probe_pos += 1
+        # 4. First data packet is always cv_log + 32:
+        #    cv_log+0:  16-byte CompressedVector section header
+        #    cv_log+16: 16-byte section index entry
+        #    cv_log+32: first data packet (type=1)
+        first_pkt_log = cv_log + 32
+        self._log(f"CV phys={cv_phys_off} -> log={cv_log}, "
+                  f"first data pkt at log={first_pkt_log}")
 
-        if pkt0_pos is None:
-            raise ValueError("Could not find first data packet")
+        # 5. Parse the first data packet header to get stream layout
+        hdr_bytes = logical[first_pkt_log : first_pkt_log + 6].tobytes()
+        typ, _, plen_m1, bcount = struct.unpack('<BBHH', hdr_bytes)
+        if typ != 1:
+            raise ValueError(f"Expected data packet (type=1) at log={first_pkt_log}, "
+                             f"got type={typ} — file structure differs from expected")
+        pkt_size   = plen_m1 + 1
+        pkt_header = 6 + bcount * 2
+        sl_bytes   = logical[first_pkt_log + 6 : first_pkt_log + pkt_header].tobytes()
+        bslens     = struct.unpack(f'<{bcount}H', sl_bytes)
+        pts_per_pkt = bslens[x_idx] // 4  # float32 = 4 bytes
 
-        # Parse first packet header using small tobytes() on header only
-        hdr_bytes = logical[pkt0_pos:pkt0_pos + 6].tobytes()
-        _, _, plen0_m1, bcount0 = struct.unpack('<BBHH', hdr_bytes)
-        pkt_size = plen0_m1 + 1
-        pkt_header = 6 + bcount0 * 2
-        sl_bytes = logical[pkt0_pos + 6:pkt0_pos + pkt_header].tobytes()
-        bslens0 = struct.unpack(f'<{bcount0}H', sl_bytes)
-        pts_per_pkt = bslens0[0] // 4  # float32 XYZ
+        self._log(f"Packet: {pkt_size}B, {bcount} streams, {pts_per_pkt} pts/pkt")
 
-        self._log(f"Packet: {pkt_size} bytes, {bcount0} streams, "
-                  f"{pts_per_pkt} pts/pkt")
+        # 6. One-shot reshape of the full data block
+        n_full  = (n // pts_per_pkt) * pts_per_pkt
+        n_pkts  = n_full // pts_per_pkt
 
-        # Validate: uniform float32 XYZ + uint8 RGB structure
-        if bcount0 < 6:
-            raise ValueError(f"Expected ≥6 bytestreams, got {bcount0}")
-        if pts_per_pkt == 0:
-            raise ValueError("Zero points in first packet")
-        for ax in range(3):
-            if bslens0[ax] != pts_per_pkt * 4:
-                raise ValueError(
-                    f"Stream {ax} size {bslens0[ax]} != "
-                    f"expected {pts_per_pkt * 4} (non-float32 XYZ?)")
-        if has_rgb:
-            for ch in range(3):
-                if bslens0[3 + ch] != pts_per_pkt:
-                    raise ValueError(
-                        f"Stream {3+ch} size {bslens0[3+ch]} != "
-                        f"expected {pts_per_pkt} (non-uint8 RGB?)")
-
-        # 4. Vectorized extraction using ravel() — no intermediate
-        #    tobytes() copy, no np.ascontiguousarray() overhead.
-        #    ravel() on a strided view does the contiguous copy
-        #    internally in C with optimal cache access patterns.
-        n_full_pkts = n // pts_per_pkt
-        n_remainder = n % pts_per_pkt
-        n_full = n_full_pkts * pts_per_pkt
+        x_off = pkt_header + sum(bslens[:x_idx])
+        y_off = pkt_header + sum(bslens[:y_idx])
+        z_off = pkt_header + sum(bslens[:z_idx])
 
         t0 = time.time()
-        # Reshape logical numpy array into packet rows
-        pkt_view = logical[pkt0_pos:pkt0_pos + n_full_pkts * pkt_size]
-        pkt_view = pkt_view.reshape(n_full_pkts, pkt_size)
+        pkt_view = logical[first_pkt_log : first_pkt_log + n_pkts * pkt_size]
+        pkt_view = pkt_view.reshape(n_pkts, pkt_size)
 
-        # XYZ: slice columns from packet view, ravel, reinterpret as f32
-        xyz = np.empty((n, 3), dtype=np.float32)
-        for ax in range(3):
-            off = pkt_header + sum(bslens0[:ax])
-            sz = bslens0[ax]
-            col = pkt_view[:, off:off + sz].ravel()
-            xyz[:n_full, ax] = col.view(np.float32)
+        xyz = np.empty((n_full, 3), dtype=np.float32)
+        xyz[:, 0] = pkt_view[:, x_off : x_off + bslens[x_idx]].ravel().view(np.float32)
+        xyz[:, 1] = pkt_view[:, y_off : y_off + bslens[y_idx]].ravel().view(np.float32)
+        xyz[:, 2] = pkt_view[:, z_off : z_off + bslens[z_idx]].ravel().view(np.float32)
 
-        # RGB: same approach, uint8 columns
         colors_u8 = None
         if has_rgb:
-            colors_u8 = np.empty((n, 3), dtype=np.uint8)
-            for ch in range(3):
-                off = pkt_header + sum(bslens0[:3 + ch])
-                sz = bslens0[3 + ch]
-                colors_u8[:n_full, ch] = pkt_view[:, off:off + sz].ravel()
+            r_off = pkt_header + sum(bslens[:r_idx])
+            g_off = pkt_header + sum(bslens[:g_idx])
+            b_off = pkt_header + sum(bslens[:b_idx])
+            colors_u8 = np.empty((n_full, 3), dtype=np.uint8)
+            colors_u8[:, 0] = pkt_view[:, r_off : r_off + bslens[r_idx]].ravel()
+            colors_u8[:, 1] = pkt_view[:, g_off : g_off + bslens[g_idx]].ravel()
+            colors_u8[:, 2] = pkt_view[:, b_off : b_off + bslens[b_idx]].ravel()
         del pkt_view
 
-        # Handle last (shorter) packet
-        if n_remainder > 0:
-            last_pos = pkt0_pos + n_full_pkts * pkt_size
-            last_sl = struct.unpack_from(
-                f'<{bcount0}H',
-                logical[last_pos + 6:last_pos + pkt_header].tobytes())
-            dp = last_pos + pkt_header
-            for ax in range(3):
-                sl = last_sl[ax]
-                npts = sl // 4
-                tmp = logical[dp:dp + sl].copy()
-                xyz[n_full:n_full + npts, ax] = tmp.view(np.float32)
-                dp += sl
-            if has_rgb:
-                for ch in range(3):
-                    sl = last_sl[3 + ch]
-                    colors_u8[n_full:n_full + sl, ch] = logical[dp:dp + sl]
-                    dp += sl
-
         t_parse = time.time() - t0
-        self._log(f"Binary parse: {t_parse:.1f}s "
-                  f"({n / t_parse / 1e6:.0f}M pts/s)")
+        self._log(f"Binary parse: {t_parse:.1f}s ({n_full / t_parse / 1e6:.1f}M pts/s)")
         gc.collect()
         return xyz, colors_u8
-
     # ------------------------------------------------------------------
     # Fallback: libe57 SourceDestBuffer reader
     # ------------------------------------------------------------------
+
+
 
     def _libe57_read(self, path, n, has_rgb, available):
         """Read via libe57 C++ bindings (slower but more robust)."""
@@ -724,23 +688,44 @@ class E57ImportWorker(QThread):
 
         layers = []
 
-        # Raw scan layer — always present for resolution switching
+        # Raw scan layer -- always present for resolution switching
         self.stage_progress.emit("Raw scan...", 5)
-        # Apply alignment transform to raw points so all layers share
-        # the same coordinate system (rotation + Z-shift from _stage_align).
-        raw_pts = raw_arrays["points"].astype(np.float64)
-        raw_pts = (self._align_R @ (raw_pts - self._align_center).T).T + self._align_center
-        raw_pts[:, 2] -= self._align_z_shift
-        raw_arrays["points"] = raw_pts.astype(np.float32)
-        del raw_pts
+        # Optimized: perform in-place float32 transformation using BLAS dot()
+        # into a contiguous output buffer. This is significantly faster and 
+        # more cache-friendly than axis-by-axis loops on column-major views.
+        raw_pts = raw_arrays["points"]
+        R = self._align_R.astype(np.float32)
+        center = self._align_center.astype(np.float32)
+        z_shift = float(self._align_z_shift)
+
+        t_raw = time.time()
+        print(f"Build: transforming {len(raw_pts):,} pts...")
+        raw_pts -= center
+        
+        # BLAS dot product (uses AMX/accel on M-series)
+        res = np.empty_like(raw_pts)
+        np.dot(raw_pts, R.T, out=res)
+        
+        # Apply shift-back and Z-alignment in-place on result
+        shift_back = center - np.array([0, 0, z_shift], dtype=np.float32)
+        res += shift_back
+        
+        raw_arrays["points"] = res
+        print(f"Build: raw transform finished in {time.time() - t_raw:.2f}s")
+        self._log(f"Raw points transform: {time.time() - t_raw:.2f}s")
+
         layers.append(self._make_raw_layer(raw_arrays))
-        del raw_arrays
+        del raw_arrays, raw_pts
         gc.collect()
 
+
         self.stage_progress.emit("Mid-res cloud...", 10)
+        t_mid = time.time()
         layers.append(self._make_pcd_layer(
             pcd_aligned, "midres", "Mid-Resolution Point Cloud",
             visible=True, opacity=0.6))
+        self._log(f"Mid-res layer build: {time.time() - t_mid:.2f}s")
+
 
         # Per-surface clouds
         for i, surf in enumerate(surfaces):
@@ -824,7 +809,7 @@ class E57ImportWorker(QThread):
     def _extract_panoramas(self, path: str) -> list:
         """Extract panorama images using the modular panorama subpackage.
 
-        Delegates to rendering.panorama.extractor — see that module for
+        Delegates to rendering.panorama.extractor -- see that module for
         the full extraction logic and configurable constants.
         """
         try:
@@ -1154,7 +1139,7 @@ class E57ProgressDialog(QDialog):
 # =============================================================================
 
 class E57Importer:
-    """E57 importer for the plugin system — wraps E57ImportWorker."""
+    """E57 importer for the plugin system -- wraps E57ImportWorker."""
 
     @property
     def name(self) -> str:
