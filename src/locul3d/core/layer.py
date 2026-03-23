@@ -32,6 +32,7 @@ class LayerData:
         # Geometry arrays
         self.points: Optional[np.ndarray] = None       # Nx3 float32
         self.colors: Optional[np.ndarray] = None       # Nx3 float32
+        self.colors_u8: Optional[np.ndarray] = None    # Nx3 uint8 (compact storage)
         self.normals: Optional[np.ndarray] = None      # Nx3 float32
         self.triangles: Optional[np.ndarray] = None    # Mx3 uint32
         self.line_points: Optional[np.ndarray] = None  # Lx3 float32 (wireframe)
@@ -41,6 +42,9 @@ class LayerData:
         self.tri_count: int = 0
         self.loaded: bool = False
         self.load_error: Optional[str] = None
+
+        # GPU state: True once VBOs have been uploaded for this layer
+        self.gpu_resident: bool = False
 
         # Cached byte buffers for GL client-side arrays
         self._pts_bytes: Optional[bytes] = None
@@ -149,9 +153,24 @@ class LayerData:
         """Release all numpy source data to free memory."""
         self.points = None
         self.colors = None
+        self.colors_u8 = None
         self.normals = None
         self.triangles = None
         self.line_points = None
+        self.evict_byte_caches()
+
+    def release_source_data_after_vbo(self):
+        """Release numpy arrays once VBOs are on the GPU.
+
+        Keeps colors_u8 (compact) and points metadata (for bounds), but
+        frees the float32 expansion and byte caches.  The VBO data lives
+        in GPU RAM and does not need the CPU-side copies.
+        """
+        if not self.gpu_resident:
+            return
+        # Free float32 color expansion (will be re-expanded from colors_u8
+        # if VBO is ever recreated, e.g. after hide then show).
+        self.colors = None
         self.evict_byte_caches()
 
     def get_pts_bytes(self) -> Optional[bytes]:
@@ -199,7 +218,14 @@ class LayerData:
         return self._lines_bytes
 
     def get_colors_array(self) -> Optional[np.ndarray]:
-        """Return contiguous float32 colors array for direct GL use."""
+        """Return contiguous float32 colors array for direct GL use.
+
+        If only compact uint8 colors are available, expand them to float32
+        on demand.  The expansion is cached in self.colors so it only
+        happens once per VBO upload cycle.
+        """
+        if self.colors is None and self.colors_u8 is not None:
+            self.colors = self.colors_u8.astype(np.float32) / 255.0
         if self.colors is None:
             return None
         if self.colors.dtype != np.float32 or not self.colors.flags['C_CONTIGUOUS']:
@@ -216,11 +242,12 @@ class LayerData:
 
     def get_rgba_bytes(self) -> Optional[bytes]:
         """Get RGBA color bytes with current opacity baked into alpha channel."""
-        if self.colors is None:
+        colors = self.get_colors_array()  # triggers uint8→float32 if needed
+        if colors is None:
             return None
         if self._rgba_bytes is None or self._rgba_opacity != self.opacity:
-            rgba = np.empty((len(self.colors), 4), dtype=np.float32)
-            rgba[:, :3] = self.colors
+            rgba = np.empty((len(colors), 4), dtype=np.float32)
+            rgba[:, :3] = colors
             rgba[:, 3] = self.opacity
             self._rgba_bytes = rgba.tobytes()
             self._rgba_opacity = self.opacity
@@ -228,11 +255,12 @@ class LayerData:
 
     def get_rgba_array(self) -> Optional[np.ndarray]:
         """Get RGBA float32 array with opacity in alpha. No bytes copy."""
-        if self.colors is None:
+        colors = self.get_colors_array()  # triggers uint8→float32 if needed
+        if colors is None:
             return None
         if self._rgba_array is None or self._rgba_opacity != self.opacity:
-            rgba = np.empty((len(self.colors), 4), dtype=np.float32)
-            rgba[:, :3] = self.colors
+            rgba = np.empty((len(colors), 4), dtype=np.float32)
+            rgba[:, :3] = colors
             rgba[:, 3] = self.opacity
             self._rgba_array = rgba
             self._rgba_opacity = self.opacity

@@ -38,7 +38,7 @@ AABB_FACES = [
 
 # Layer group definitions: (group_name, classifier_function)
 LAYER_GROUPS = OrderedDict([
-    ("Scan", lambda l: l.id in ("aligned", "unclassified", "decimated", "raw_scan")),
+    ("Scan", lambda l: l.id in ("midres", "unclassified", "decimated", "raw_scan")),
     ("Panoramas", lambda l: l.layer_type == "panorama"),
     ("Surfaces", lambda l: l.id.startswith("surface_") or l.layer_type == "mesh"),
     ("Overlays", lambda l: l.layer_type == "wireframe"),

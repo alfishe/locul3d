@@ -131,7 +131,10 @@ class InfoPanel(QWidget):
         geom_rows = [
             ("Points", f"{layer.point_count:,}"),
         ]
-        has_vtx_rgb = layer.colors is not None and len(layer.colors) > 0
+        has_vtx_rgb = (
+            (layer.colors is not None and len(layer.colors) > 0) or
+            (getattr(layer, 'colors_u8', None) is not None and len(layer.colors_u8) > 0)
+        )
         geom_rows.append(("Vertex Colors", "Yes" if has_vtx_rgb else "No"))
         has_normals = layer.normals is not None and len(layer.normals) > 0
         geom_rows.append(("Normals", "Yes" if has_normals else "No"))
@@ -158,7 +161,10 @@ class InfoPanel(QWidget):
             ("Vertices", f"{layer.point_count:,}"),
             ("Triangles", f"{layer.tri_count:,}"),
         ]
-        has_vtx_rgb = layer.colors is not None and len(layer.colors) > 0
+        has_vtx_rgb = (
+            (layer.colors is not None and len(layer.colors) > 0) or
+            (getattr(layer, 'colors_u8', None) is not None and len(layer.colors_u8) > 0)
+        )
         geom_rows.append(("Vertex Colors", "Yes" if has_vtx_rgb else "No"))
         has_normals = layer.normals is not None and len(layer.normals) > 0
         geom_rows.append(("Normals", "Yes" if has_normals else "No"))
