@@ -116,7 +116,10 @@ class BaseGLViewport(QOpenGLWidget):
         self._vbos: Dict[Tuple[str, str], int] = {}
 
         # Interactive decimation state
-        self._interacting = False  # mouse-drag orbit/pan
+        self._interacting = False  # mouse-drag orbit/pan or scroll
+        self._interact_timer = QTimer(self)
+        self._interact_timer.setSingleShot(True)
+        self._interact_timer.timeout.connect(self._stop_interaction)
         self._adjusting_opacity = False  # opacity slider being dragged
 
         # Scene clipping: None = no clip, or (x0, x1, y0, y1, z0, z1)
@@ -135,6 +138,17 @@ class BaseGLViewport(QOpenGLWidget):
         self._fps_timer = QTimer(self)
         self._fps_timer.timeout.connect(self._update_fps)
         self._fps_timer.start(1000)
+
+    def _start_interaction(self):
+        """Enable interactive decimation for high FPS (30+)."""
+        self._interacting = True
+        self._interact_timer.start(300)  # Keep low-res for 300ms after last event
+        self.update()
+
+    def _stop_interaction(self):
+        """Redraw in high-res once movement stops."""
+        self._interacting = False
+        self.update()
 
     # --- Camera Control ---
 
@@ -275,6 +289,16 @@ class BaseGLViewport(QOpenGLWidget):
         glBindBuffer(target, 0)
         self._vbos[key] = vbo
 
+        # Mark the source layer as GPU-resident so it can release
+        # redundant CPU-side float32 caches (the VBO holds the data).
+        for layer in self.layer_manager.layers:
+            if layer.id == layer_id:
+                layer.gpu_resident = True
+                # Release the float32 color expansion — uint8 compact
+                # stays for potential re-upload after hide/show cycle.
+                layer.release_source_data_after_vbo()
+                break
+
         return vbo
 
     # --- Rendering ---
@@ -384,11 +408,17 @@ class BaseGLViewport(QOpenGLWidget):
         opaque = [l for l in visible if l.opacity >= 0.99]
         transparent = [l for l in visible if l.opacity < 0.99]
 
+        # Evict VBOs for layers that became invisible since last frame.
+        # This frees GPU RAM for large hidden layers (e.g. 348M-pt raw scan).
+        visible_ids = {l.id for l in visible}
+        for layer in self.layer_manager.layers:
+            if layer.id not in visible_ids and layer.gpu_resident:
+                self.delete_vbos_for_layer(layer.id)
+                layer.gpu_resident = False
+
         # Global interactive stride: cap total drawn points during
-        # mouse-drag so aggregate draw stays within budget.  Separate
-        # from the per-layer MAX_INTERACTIVE_PTS which handles single
-        # huge layers (e.g. 120M raw E57 scans).
-        INTERACTIVE_BUDGET = 5_000_000
+        # mouse-drag so aggregate draw stays within budget.
+        INTERACTIVE_BUDGET = 25_000_000
         if self._interacting:
             total_vis = sum(
                 l.point_count for l in visible if l.layer_type == "pointcloud"
@@ -527,36 +557,27 @@ class BaseGLViewport(QOpenGLWidget):
         if use_uniform:
             r, g, b = layer.color[:3]
             glColor4f(r, g, b, layer.opacity)
-        elif layer.colors is not None:
+        elif layer.colors is not None or getattr(layer, 'colors_u8', None) is not None:
             has_vtx_colors = True
         else:
             glColor4f(0.7, 0.7, 0.8, layer.opacity)
 
-        # --- Stride-based LOD during interaction ---
-        # Problem: drawing 100M+ points every frame through PyOpenGL's
-        # GL→Metal translation layer yields <1 FPS, making orbit/pan
-        # unusable.  The GPU can rasterise the points fast enough, but
-        # the per-frame Python→driver overhead is proportional to the
-        # draw count.
-        #
-        # Solution: while the mouse is held down (_interacting=True),
-        # we increase the glVertexPointer *stride* so that OpenGL reads
-        # every Nth vertex from the same VBO — no data copy, no second
-        # buffer.  This keeps draw_count ≤ MAX_INTERACTIVE_PTS,
-        # giving smooth camera control at reduced point density.
-        # On mouse-release the viewport redraws at full resolution.
-        #
-        # A separate, tighter limit applies while the opacity slider is
-        # being dragged, so the blend-state preview stays responsive.
-        MAX_INTERACTIVE_PTS = 25_000_000
-        MAX_OPACITY_PREVIEW_PTS = 2_000_000
+        # --- Stride-based LOD ---
+        # On Apple-Silicon, PyOpenGL → Metal bridge limits throughput.
+        # Use full density when stationary (MAX_STATIC_PTS=1G), but
+        # use aggressive stride during interaction for high FPS.
+        MAX_STATIC_PTS = 1_000_000_000   # Stationary: 100% density (full 348M)
+        MAX_INTERACTIVE_PTS = 25_000_000  # Drag: High detail preview
+        MAX_OPACITY_PREVIEW_PTS = 500_000 # Slider: Instant response
 
         if self._adjusting_opacity and layer.point_count > MAX_OPACITY_PREVIEW_PTS:
             stride = max(1, layer.point_count // MAX_OPACITY_PREVIEW_PTS)
-        elif self._interacting and layer.point_count > MAX_INTERACTIVE_PTS:
-            stride = max(1, layer.point_count // MAX_INTERACTIVE_PTS)
         elif self._interacting:
-            stride = getattr(self, "_global_interact_stride", 1)
+            stride = max(1, layer.point_count // MAX_INTERACTIVE_PTS)
+            # Also respect the global budget stride
+            stride = max(stride, getattr(self, "_global_interact_stride", 1))
+        elif layer.point_count > MAX_STATIC_PTS:
+            stride = max(1, layer.point_count // MAX_STATIC_PTS)
         else:
             stride = 1
 
@@ -621,7 +642,7 @@ class BaseGLViewport(QOpenGLWidget):
         if use_uniform:
             r, g, b = layer.color[:3]
             glColor4f(r, g, b, layer.opacity)
-        elif layer.colors is not None:
+        elif layer.colors is not None or getattr(layer, 'colors_u8', None) is not None:
             has_vtx_colors = True
         else:
             glColor4f(0.6, 0.65, 0.7, layer.opacity)
@@ -687,7 +708,7 @@ class BaseGLViewport(QOpenGLWidget):
         if use_uniform:
             r, g, b = layer.color[:3]
             glColor4f(r, g, b, layer.opacity)
-        elif layer.colors is not None:
+        elif layer.colors is not None or getattr(layer, 'colors_u8', None) is not None:
             has_vtx_colors = True
         else:
             glColor4f(1.0, 0.3, 0.3, layer.opacity)
@@ -1108,6 +1129,11 @@ class BaseGLViewport(QOpenGLWidget):
             glDeleteBuffers(len(ids), ids)
         except Exception:
             pass
+        # Mark layer as no longer GPU-resident
+        for layer in self.layer_manager.layers:
+            if layer.id == layer_id:
+                layer.gpu_resident = False
+                break
 
     def delete_all_vbos(self):
         """Free every VBO (e.g. when loading a new file)."""
@@ -1131,6 +1157,7 @@ class BaseGLViewport(QOpenGLWidget):
         self._click_pos = event.position()  # remember for drag detection
         self._mouse_btn = event.button()
         self._interacting = True
+        self.update()  # dropdown to interactive budget immediately
 
     def mouseMoveEvent(self, event):
         """Handle mouse movement for camera control and marker hover."""
@@ -1206,7 +1233,7 @@ class BaseGLViewport(QOpenGLWidget):
             self.cam_distance = max(0.01, self.cam_distance)
 
         self._last_mouse = pos
-        self.update()
+        self._start_interaction()
 
     def mouseDoubleClickEvent(self, event):
         """Double-click on panorama marker → select + open info panel."""
@@ -1249,8 +1276,7 @@ class BaseGLViewport(QOpenGLWidget):
         self._last_mouse = None
         self._click_pos = None
         self._mouse_btn = None
-        self._interacting = False
-        self.update()  # full-quality redraw
+        self._start_interaction()  # redraw happens after 300ms delay
 
     def wheelEvent(self, event):
         angle = event.angleDelta()
@@ -1260,11 +1286,11 @@ class BaseGLViewport(QOpenGLWidget):
         # Both cam_fov and _pano_fov must stay in sync so the point cloud
         # projection matches the panorama sphere exactly.
         if self._panorama and self._panorama.is_active:
+            self._start_interaction()
             step = -2.0 if delta > 0 else 2.0  # scroll up = zoom in
             new_fov = max(20.0, min(120.0, self._panorama._pano_fov + step))
             self._panorama._pano_fov = new_fov
             self.cam_fov = new_fov  # keep scene projection in sync
-            self.update()
             return
 
         # Normal mode: dolly through scene
@@ -1281,7 +1307,7 @@ class BaseGLViewport(QOpenGLWidget):
         self.cam_target += forward * step
         self.cam_distance = min(self.cam_distance, self._scene_radius * 0.3)
         self.cam_distance = max(0.01, self.cam_distance)
-        self.update()
+        self._start_interaction()
 
     # --- Scene correction keyboard step sizes ---
     _SHIFT_STEP = 0.05  # metres per key press
