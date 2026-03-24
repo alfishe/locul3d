@@ -369,17 +369,9 @@ class LayerManager:
         from ..plugins.importers.loaders import load_geometry
         
         ext = Path(path).suffix.lower()
+        # Default type — load_geometry will upgrade to "mesh" or
+        # "wireframe" if triangles/lines are found during parsing.
         layer_type = "mesh" if ext == ".obj" else "pointcloud"
-
-        # For PLY, probe whether it contains triangles
-        if ext == ".ply":
-            try:
-                import open3d as o3d
-                mesh = o3d.io.read_triangle_mesh(path)
-                if len(mesh.triangles) > 0:
-                    layer_type = "mesh"
-            except Exception:
-                pass
 
         from .constants import AUTO_LAYER_COLORS
         color_idx = len(self.layers) % len(AUTO_LAYER_COLORS)
@@ -402,7 +394,9 @@ class LayerManager:
         # renderer falls through to vertex-color path.  Exception: wireframe
         # layers — extract the representative frame color from the per-line
         # colors so the swatch shows the actual wireframe color from the PLY.
-        if layer.colors is not None and len(layer.colors) > 0:
+        has_vtx_colors = ((layer.colors is not None and len(layer.colors) > 0)
+                          or (layer.colors_u8 is not None and len(layer.colors_u8) > 0))
+        if has_vtx_colors:
             if layer.layer_type == "wireframe":
                 # Use the median per-line color as the swatch color
                 median_rgb = np.median(layer.colors[:, :3], axis=0)
