@@ -57,7 +57,8 @@ class ThemeManager:
                 padding: 5px 10px; border-radius: 4px; border: 1px solid {C['button_border']}; }}
             QToolBar QToolButton:hover {{ background: {C['hover']}; border-color: {C['accent']}; }}
             QToolBar QToolButton:checked {{ background: {C['accent']}; color: #ffffff; border-color: {C['accent']}; }}
-            QToolBar::separator {{ background: {C['border']}; width: 1px; margin: 4px 6px; }}
+            QToolBar::separator {{ background: transparent; width: 1px; height: 0px; margin: 4px 6px; }}
+            QToolBar > QWidget {{ background: transparent; }}
             QStatusBar {{ background: {C['input_bg']}; color: {C['text_muted']}; font-size: 12px; }}
             QDockWidget {{ color: {C['text']}; font-size: 12px; }}
             QDockWidget::title {{ background: {C['card']}; padding: 6px; }}
