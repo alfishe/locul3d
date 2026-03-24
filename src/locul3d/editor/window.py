@@ -247,6 +247,11 @@ class EditorWindow(QMainWindow):
         act_open_folder.triggered.connect(self._on_open_folder)
         toolbar.addAction(act_open_folder)
 
+        act_clear = QAction("Clear Scene", self)
+        act_clear.setToolTip("Remove all layers and annotations from the scene")
+        act_clear.triggered.connect(self._on_clear_scene)
+        toolbar.addAction(act_clear)
+
         toolbar.addSeparator()
 
         # YAML save/load
@@ -676,6 +681,32 @@ class EditorWindow(QMainWindow):
         self._post_load()
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
         self.setWindowTitle(f"Locul3D Editor — {folder_path.name}")
+
+    def _on_clear_scene(self):
+        """Remove all layers and annotations from the scene."""
+        self.gl_viewport.delete_all_vbos()
+        for layer in self.layer_manager.layers:
+            layer.release_source_data()
+        self.layer_manager.layers.clear()
+        self.layer_manager.invalidate_scene_aabb()
+        self.annotations.clear()
+        self.planes.clear()
+        self._undo_stack.clear()
+        self._yaml_path = None
+        self._color_idx = 0
+        self._plane_color_idx = 0
+        self.gl_viewport.selected_idx = -1
+        self.gl_viewport.scene_correction = SceneCorrection()
+        self.gl_viewport.scene_clip = None
+        self.gl_viewport.set_correction_diagnostics(None)
+        self._ref_point = None
+        self.gl_viewport.ref_point = None
+        self.bbox_panel.rebuild_list()
+        self.plane_panel.rebuild_list()
+        self.info_panel.clear()
+        self.layer_panel.rebuild()
+        self.gl_viewport.update()
+        self.status_label.setText("Scene cleared")
 
     # ------------------------------------------------------------------
     # BBox operations
