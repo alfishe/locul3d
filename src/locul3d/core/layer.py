@@ -410,19 +410,12 @@ class LayerManager:
         layer = LayerData(layer_def, self.base_dir)
         load_geometry(path, layer)
         layer.loaded = True  # Mark as loaded so visible_layers() includes it
-        # If file has per-vertex colors, drop the auto layer color so the
-        # renderer falls through to vertex-color path.  Exception: wireframe
-        # layers — extract the representative frame color from the per-line
-        # colors so the swatch shows the actual wireframe color from the PLY.
-        has_vtx_colors = ((layer.colors is not None and len(layer.colors) > 0)
-                          or (layer.colors_u8 is not None and len(layer.colors_u8) > 0))
-        if has_vtx_colors:
-            if layer.layer_type == "wireframe":
-                # Use the median per-line color as the swatch color
-                median_rgb = np.median(layer.colors[:, :3], axis=0)
-                layer.color = median_rgb.tolist() + [1.0]
-            else:
-                layer.color = None
+        # Keep auto_color on the layer so "Layer Colors" toggle can switch
+        # between uniform tint (to distinguish layers) and per-vertex RGB.
+        # For wireframes, use the median per-line color as the swatch.
+        if layer.layer_type == "wireframe" and layer.colors is not None and len(layer.colors) > 0:
+            median_rgb = np.median(layer.colors[:, :3], axis=0)
+            layer.color = median_rgb.tolist() + [1.0]
         self.layers.append(layer)
         self.invalidate_scene_aabb()
 
