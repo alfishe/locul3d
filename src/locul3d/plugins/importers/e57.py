@@ -286,6 +286,21 @@ class E57ImportWorker(QThread):
         stats["total_time"] = time.time() - t_total
         stats["surfaces"] = []
 
+        # Return freed heap pages to the OS.  Without this, peak RSS
+        # stays ~2× higher than live data because glibc/macOS hold
+        # freed mmap'd regions in the process address space.
+        gc.collect()
+        try:
+            import ctypes
+            if sys.platform == 'darwin':
+                ctypes.CDLL('libSystem.B.dylib').malloc_zone_pressure_relief(
+                    None, 0)
+            elif sys.platform.startswith('linux'):
+                ctypes.CDLL('libc.so.6').malloc_trim(0)
+            # Windows: HeapCompact not needed — CRT returns large blocks
+        except (OSError, AttributeError):
+            pass
+
         result.layers = layers
         result.metadata = meta
         result.stats = stats
@@ -530,7 +545,7 @@ class E57ImportWorker(QThread):
             c_local = c_log_start - c_start_page * DATA_PER_PAGE
             d = c_logical[c_local:]
 
-            # Extract fields from this chunk
+            # Extract fields from this chunk (F-order columns are contiguous)
             for i in range(chunk_n):
                 o = i * pkt_size
                 pkt_idx = chunk_start + i
@@ -756,51 +771,55 @@ class E57ImportWorker(QThread):
         shift_back_vec = center - np.array([0, 0, z_shift], dtype=np.float32)
         total_offset = shift_back_vec - (center @ R.T)
 
-        # Column-wise transform with pre-allocated temp to avoid
-        # temporary 1.4 GB arrays from expression evaluation.
-        # F-order columns are contiguous → each op is a sequential memcpy.
-        # Peak extra memory: 3 × 1.4 GB (ox, oy, oz copies) + 1.4 GB (tmp).
-        n_pts = len(raw_pts)
+        # Chunked column-wise transform: process 10M points at a time
+        # so temporaries use ~160 MB instead of 5.6 GB.  F-order columns
+        # are contiguous, so chunk slices (raw_pts[s:e, j]) are contiguous.
         RT = R.T.astype(np.float32)
-        ox = raw_pts[:, 0].copy()   # 1.4 GB — needed for all 3 outputs
-        oy = raw_pts[:, 1].copy()   # 1.4 GB
-        oz = raw_pts[:, 2].copy()   # 1.4 GB — must copy: loop j=2 overwrites col 2 before reading oz
-        tmp = np.empty(n_pts, dtype=np.float32)
-        for j in range(3):
-            np.multiply(ox, RT[0, j], out=raw_pts[:, j])
-            np.multiply(oy, RT[1, j], out=tmp)
-            np.add(raw_pts[:, j], tmp, out=raw_pts[:, j])
-            np.multiply(oz, RT[2, j], out=tmp)
-            np.add(raw_pts[:, j], tmp, out=raw_pts[:, j])
-            raw_pts[:, j] += total_offset[j]
-        del ox, oy, oz, tmp
+        CHUNK = 10_000_000
+        n_pts = len(raw_pts)
+        for s in range(0, n_pts, CHUNK):
+            e = min(s + CHUNK, n_pts)
+            ox = raw_pts[s:e, 0].copy()
+            oy = raw_pts[s:e, 1].copy()
+            oz = raw_pts[s:e, 2].copy()
+            tmp = np.empty(e - s, dtype=np.float32)
+            for j in range(3):
+                np.multiply(ox, RT[0, j], out=raw_pts[s:e, j])
+                np.multiply(oy, RT[1, j], out=tmp)
+                np.add(raw_pts[s:e, j], tmp, out=raw_pts[s:e, j])
+                np.multiply(oz, RT[2, j], out=tmp)
+                np.add(raw_pts[s:e, j], tmp, out=raw_pts[s:e, j])
+                raw_pts[s:e, j] += total_offset[j]
         self._log(f"Raw scan aligned: {time.time() - t_align:.2f}s (column-wise)")
 
         # Transform ingested AABB to world space for immediate viewport fit
         lmin_w = (self._ingest_aabb_min @ R.T) + total_offset
         lmax_w = (self._ingest_aabb_max @ R.T) + total_offset
-        # Note: Since it's a box, min/max might swap due to rotation, so we re-bound
         cur_min = np.minimum(lmin_w, lmax_w)
         cur_max = np.maximum(lmin_w, lmax_w)
 
         # ------------------------------------------------------------------
-        # Part 2: Layer Construction (Zero-Copy)
+        # Part 2: Layer Construction
         # ------------------------------------------------------------------
-        
-        # 1. Raw Scan Layer (Direct wrap)
+
+        # 1. Raw Scan Layer
         raw_layer = self._make_raw_layer(raw_arrays)
         raw_layer._aabb_min = cur_min
         raw_layer._aabb_max = cur_max
         layers.append(raw_layer)
 
-        # 2. Mid-Resolution Cloud (Zero-copy Stride View)
+        # 2. Mid-Resolution Cloud
         self.stage_progress.emit("Mid-res cloud...", 10)
         t_mid = time.time()
-        stride = max(1, n_pts // 5_000_000) # calculate stride to hit ~5M pts
-        
+        stride = max(1, n_pts // 5_000_000)
+
+        # Contiguous copies (not views) so mid-res doesn't pin the
+        # full raw array in memory if raw_scan layer is later freed.
         mid_res_layer = self._make_raw_layer({
-            "points": raw_pts[::stride], 
-            "colors_u8": raw_arrays.get("colors_u8")[::stride] if raw_arrays.get("colors_u8") is not None else None
+            "points": raw_pts[::stride].copy(),
+            "colors_u8": (raw_arrays["colors_u8"][::stride].copy()
+                          if raw_arrays.get("colors_u8") is not None
+                          else None),
         })
         mid_res_layer.id = "midres"
         mid_res_layer.name = "Mid-Resolution Point Cloud"

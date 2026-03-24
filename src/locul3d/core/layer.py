@@ -168,9 +168,11 @@ class LayerData:
         """
         if not self.gpu_resident:
             return
-        # Free float32 color expansion (will be re-expanded from colors_u8
-        # if VBO is ever recreated, e.g. after hide then show).
-        self.colors = None
+        # Only free float32 colors if we have a compact uint8 backup to
+        # re-expand from.  PLY/OBJ layers have colors but no colors_u8;
+        # freeing colors there permanently loses them on hide/show cycle.
+        if self.colors_u8 is not None:
+            self.colors = None
         self.evict_byte_caches()
 
     def get_pts_bytes(self) -> Optional[bytes]:
@@ -184,6 +186,18 @@ class LayerData:
             return None
         if self.points.dtype != np.float32 or not self.points.flags['C_CONTIGUOUS']:
             self.points = np.ascontiguousarray(self.points, dtype=np.float32)
+            # Return freed F-order pages to OS immediately so RSS doesn't
+            # stay at 2× the array size after conversion.
+            import gc, sys
+            gc.collect()
+            try:
+                import ctypes
+                if sys.platform == 'darwin':
+                    ctypes.CDLL('libSystem.B.dylib').malloc_zone_pressure_relief(None, 0)
+                elif sys.platform.startswith('linux'):
+                    ctypes.CDLL('libc.so.6').malloc_trim(0)
+            except (OSError, AttributeError):
+                pass
         return self.points
 
     def get_normals_bytes(self) -> Optional[bytes]:
