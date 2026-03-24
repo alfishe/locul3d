@@ -340,21 +340,41 @@ class LayerManager:
         self._ceiling_computed = False
 
     def _compute_scene_aabb(self):
-        """Compute union AABB from all geometry layers (panoramas excluded)."""
+        """Compute union AABB from all geometry layers (panoramas excluded).
+
+        Uses per-layer cached _aabb_min/_aabb_max when available (set by
+        E57 pipeline and get_scene_bounds).  Falls back to subsampled
+        min/max for layers without cached bounds.
+        """
         global_min = None
         global_max = None
         for layer in self.layers:
             if layer.layer_type == "panorama":
                 continue
-            if layer.points is not None and len(layer.points) > 0:
-                lmin = layer.points.min(axis=0)
-                lmax = layer.points.max(axis=0)
-                if global_min is None:
-                    global_min = lmin.copy()
-                    global_max = lmax.copy()
-                else:
-                    np.minimum(global_min, lmin, out=global_min)
-                    np.maximum(global_max, lmax, out=global_max)
+
+            # Use cached AABB if available (E57 layers, previously computed)
+            lmin = getattr(layer, '_aabb_min', None)
+            lmax = getattr(layer, '_aabb_max', None)
+
+            if lmin is None or lmax is None:
+                pts = layer.points
+                if pts is None or len(pts) == 0:
+                    continue
+                # Subsample large layers to keep AABB computation instant
+                if len(pts) > 1_000_000:
+                    pts = pts[::max(1, len(pts) // 1_000_000)]
+                lmin = pts.min(axis=0)
+                lmax = pts.max(axis=0)
+                layer._aabb_min = lmin
+                layer._aabb_max = lmax
+
+            if global_min is None:
+                global_min = np.array(lmin, dtype=np.float64)
+                global_max = np.array(lmax, dtype=np.float64)
+            else:
+                np.minimum(global_min, lmin, out=global_min)
+                np.maximum(global_max, lmax, out=global_max)
+
         if global_min is None:
             return None
         return (

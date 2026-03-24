@@ -21,60 +21,68 @@ class CeilingDetector:
     def __init__(self, bin_size: float = 0.05):
         self.bin_size = bin_size
 
-    def detect(self, layers, max_samples: int = 0) -> Optional[float]:
+    def detect(self, layers, max_samples: int = 500_000) -> Optional[float]:
         """Detect ceiling height from a list of LayerData objects.
 
-        Reads Z values directly from layer point arrays — no copies.
-        If max_samples > 0, subsamples each layer proportionally.
+        Uses per-layer cached AABBs for Z range (instant), then builds
+        a Z-histogram from subsampled data.  Skips the raw_scan layer
+        if a mid-res equivalent exists (same data, fewer points).
 
         Returns:
             Ceiling Z height, or None if detection fails.
         """
-        # First pass: find Z range across all geometry layers
+        # Filter to usable layers; prefer mid-res over raw_scan
+        has_midres = any(getattr(l, 'id', '') == 'midres' for l in layers)
+        usable = []
+        for layer in layers:
+            if layer.points is None or len(layer.points) == 0:
+                continue
+            if has_midres and getattr(layer, 'id', '') == 'raw_scan':
+                continue
+            usable.append(layer)
+
+        if not usable:
+            return None
+
+        # Z range from cached AABBs or subsampled min/max (no full scan)
         z_min_global = float('inf')
         z_max_global = float('-inf')
         total_pts = 0
 
-        for layer in layers:
-            if layer.points is None or len(layer.points) == 0:
-                continue
-            z_col = layer.points[:, 2].astype(np.float64)
-            finite = z_col[np.isfinite(z_col)]
-            if len(finite) == 0:
-                continue
-            z_min_global = min(z_min_global, float(finite.min()))
-            z_max_global = max(z_max_global, float(finite.max()))
-            total_pts += len(finite)
+        for layer in usable:
+            aabb_min = getattr(layer, '_aabb_min', None)
+            aabb_max = getattr(layer, '_aabb_max', None)
+            if aabb_min is not None and aabb_max is not None:
+                z_min_global = min(z_min_global, float(aabb_min[2]))
+                z_max_global = max(z_max_global, float(aabb_max[2]))
+            else:
+                # Subsample for bounds
+                pts = layer.points
+                stride = max(1, len(pts) // 100_000)
+                z_sample = pts[::stride, 2]
+                z_min_global = min(z_min_global, float(z_sample.min()))
+                z_max_global = max(z_max_global, float(z_sample.max()))
+            total_pts += len(layer.points)
 
         if total_pts < 100 or z_max_global - z_min_global < 1.0:
             return None
 
-        # Clamp Z range to physically reasonable bounds (no scan > 100m tall)
         z_min_global = max(z_min_global, -100.0)
         z_max_global = min(z_max_global, 100.0)
         z_range = z_max_global - z_min_global
         if z_range < 1.0 or z_range > 200.0:
             return None
 
-        # Build histogram incrementally (no concatenation)
+        # Build histogram from subsampled Z values (no float64 conversion)
         n_bins = int(z_range / self.bin_size) + 1
-        n_bins = min(n_bins, 100_000)  # safety cap
+        n_bins = min(n_bins, 100_000)
         counts = np.zeros(n_bins, dtype=np.int64)
 
-        # Subsampling stride
         stride = max(1, total_pts // max_samples) if max_samples > 0 else 1
 
-        for layer in layers:
-            if layer.points is None or len(layer.points) == 0:
-                continue
-            z_col = layer.points[::stride, 2].astype(np.float64)
-            # Filter non-finite values (NaN/inf from corrupt data)
-            finite_mask = np.isfinite(z_col)
-            if not finite_mask.all():
-                z_col = z_col[finite_mask]
-            if len(z_col) == 0:
-                continue
-            # Bin indices for this layer's Z values
+        for layer in usable:
+            z_col = layer.points[::stride, 2]
+            # Bin directly as float32 (sufficient precision for 5cm bins)
             indices = np.clip(
                 ((z_col - z_min_global) / self.bin_size).astype(np.int64),
                 0, n_bins - 1)
