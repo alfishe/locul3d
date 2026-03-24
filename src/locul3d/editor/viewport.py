@@ -85,6 +85,12 @@ class EditorViewport(BaseGLViewport):
         """Paint editor viewport with annotations overlay."""
         super()._paintGL_inner()
 
+        # In immersive panorama mode, skip all annotations, bboxes,
+        # gizmos, planes, and reference points — only the point cloud
+        # and panorama sphere are rendered.
+        if self._panorama and self._panorama.is_active:
+            return
+
         # Annotations and gizmos live in world (global) coordinates.
         # Render them using the pre-correction modelview matrix so the
         # GL scene correction does NOT apply a second time.
