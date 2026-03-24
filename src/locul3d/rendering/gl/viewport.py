@@ -493,15 +493,13 @@ class BaseGLViewport(QOpenGLWidget):
         # aligned frame from E57 import — applying correction would
         # shift the scene relative to the camera (at pano_position).
 
-        # Render all visible layers (no grid/axes in immersive)
+        # Render visible layers (no grid/axes/wireframes in immersive)
         visible = self.layer_manager.visible_layers()
         for layer in visible:
             if layer.layer_type == "pointcloud":
                 self._draw_point_layer(layer)
             elif layer.layer_type == "mesh":
                 self._draw_mesh_layer(layer)
-            elif layer.layer_type == "wireframe":
-                self._draw_wireframe_layer(layer)
 
     # --- Layer rendering (VBO path: upload once, draw many) ---
 
@@ -592,12 +590,27 @@ class BaseGLViewport(QOpenGLWidget):
         glVertexPointer(3, GL_FLOAT, pts_stride, None)
 
         if has_vtx_colors:
-            colors = layer.get_colors_array()  # Nx3 RGB float32 — immutable
-            if colors is not None:
-                vbo_rgb = self._get_or_create_vbo(layer.id, "rgb", colors)
+            # Prefer compact uint8 colors (3× less VRAM than float32).
+            # GL_UNSIGNED_BYTE with glColorPointer normalizes 0-255 → 0.0-1.0.
+            colors_u8 = getattr(layer, 'colors_u8', None)
+            if colors_u8 is not None:
+                if not colors_u8.flags['C_CONTIGUOUS']:
+                    layer.colors_u8 = np.ascontiguousarray(colors_u8)
+                    colors_u8 = layer.colors_u8
+                    import gc
+                    gc.collect()
+                rgb_stride_u8 = stride * 3 * 1  # uint8: 3 bytes per vertex
+                vbo_rgb = self._get_or_create_vbo(layer.id, "rgb", colors_u8)
                 glBindBuffer(GL_ARRAY_BUFFER, vbo_rgb)
                 glEnableClientState(GL_COLOR_ARRAY)
-                glColorPointer(3, GL_FLOAT, rgb_stride, None)
+                glColorPointer(3, GL_UNSIGNED_BYTE, rgb_stride_u8, None)
+            else:
+                colors = layer.get_colors_array()
+                if colors is not None:
+                    vbo_rgb = self._get_or_create_vbo(layer.id, "rgb", colors)
+                    glBindBuffer(GL_ARRAY_BUFFER, vbo_rgb)
+                    glEnableClientState(GL_COLOR_ARRAY)
+                    glColorPointer(3, GL_FLOAT, rgb_stride, None)
 
         # Apply layer opacity as a GPU-side blend — no data regeneration
         # needed.  RGB vertex colors have implicit alpha=1.0; we modulate
