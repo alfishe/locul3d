@@ -1183,18 +1183,37 @@ class EditorWindow(QMainWindow):
             )
 
     def _collect_all_points(self):
-        """Collect all visible point cloud data for auto-detection."""
+        """Collect visible point cloud data for auto-detection.
+
+        Returns a subsampled (~2M pts) float64 array.  Avoids the
+        30-second stall that occurred when converting the full 348M-point
+        raw_scan from F-order float32 to float64.
+        """
         import numpy as np
 
+        # Prefer the mid-res layer (already ~5M pts) over raw_scan (348M)
+        target = 2_000_000
         all_pts = []
+        seen_ids = set()
         for layer in self.layer_manager.layers:
             if not layer.visible:
                 continue
-            if hasattr(layer, "points") and layer.points is not None:
-                all_pts.append(np.asarray(layer.points, dtype=np.float64))
+            if not hasattr(layer, "points") or layer.points is None:
+                continue
+            # Skip raw_scan if we already have mid-res (same data, fewer pts)
+            if layer.id == "raw_scan" and "midres" in seen_ids:
+                continue
+            if layer.id == "midres":
+                seen_ids.add("midres")
+            pts = layer.points
+            # Stride-subsample large layers to ~target pts total
+            if len(pts) > target:
+                stride = max(1, len(pts) // target)
+                pts = pts[::stride]
+            all_pts.append(np.ascontiguousarray(pts, dtype=np.float64))
         if not all_pts:
             return None
-        return np.vstack(all_pts)
+        return np.vstack(all_pts) if len(all_pts) > 1 else all_pts[0]
 
     def _try_load_sidecar(self, scene_path: str):
         """Auto-detect and load a unified project file or correction sidecar.
