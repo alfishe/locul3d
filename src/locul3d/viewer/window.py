@@ -163,6 +163,11 @@ class ViewerWindow(QMainWindow):
         act_open_folder.triggered.connect(self._on_open_folder)
         toolbar.addAction(act_open_folder)
 
+        act_clear = QAction("Clear Scene", self)
+        act_clear.setToolTip("Remove all layers from the scene")
+        act_clear.triggered.connect(self._on_clear_scene)
+        toolbar.addAction(act_clear)
+
         # E57 Import (first-class)
         act_e57 = QAction("Import E57", self)
         act_e57.setToolTip("Import E57 point cloud with processing pipeline")
@@ -512,6 +517,28 @@ class ViewerWindow(QMainWindow):
         self._post_load()
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
         self.setWindowTitle(f"Locul3D Viewer — {folder_path.name}")
+
+    def _on_clear_scene(self):
+        """Remove all layers from the scene."""
+        self.viewport.delete_all_vbos()
+        for layer in self.layer_manager.layers:
+            layer.release_source_data()
+        self.layer_manager.layers.clear()
+        self.layer_manager.invalidate_scene_aabb()
+        self.viewport.scene_correction = SceneCorrection()
+        self.viewport.scene_clip = None
+        self._selected_layer = None
+        self.info_panel.clear()
+
+        if (hasattr(self.viewport, '_panorama')
+                and self.viewport._panorama
+                and self.viewport._panorama.is_active):
+            self.viewport.exit_panorama()
+            self.layer_panel.highlight_active_pano(None)
+
+        self.layer_panel.rebuild()
+        self.viewport.update()
+        self.status_label.setText("Scene cleared")
 
     # ------------------------------------------------------------------
     # View controls
