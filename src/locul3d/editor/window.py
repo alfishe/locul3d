@@ -202,11 +202,19 @@ class EditorWindow(QMainWindow):
 
         self._selected_layer = None
 
+        # Pre-warm file dialog platform plugin (avoids delay on first open)
+        QTimer.singleShot(200, self._prewarm_file_dialog)
+
         # Deferred file loading
         if files:
             self._deferred_files = files
             self._deferred_yaml = annotations_path
             QTimer.singleShot(100, self._deferred_load)
+
+    def _prewarm_file_dialog(self):
+        """Touch QFileDialog to initialize the platform dialog plugin early."""
+        d = QFileDialog(self)
+        d.deleteLater()
 
     # ------------------------------------------------------------------
     # UI Setup
@@ -542,11 +550,38 @@ class EditorWindow(QMainWindow):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Open Files", "", "3D Files (*.ply *.obj *.stl *.e57);;All Files (*)"
         )
-        for p in paths:
-            if Path(p).suffix.lower() == ".e57":
-                self._import_e57_file(p)
-            else:
-                self._load_file(p)
+        if not paths:
+            return
+
+        # Separate E57 files from geometry files
+        e57_paths = [p for p in paths if Path(p).suffix.lower() == ".e57"]
+        geo_paths = [p for p in paths if Path(p).suffix.lower() != ".e57"]
+
+        # Load geometry files with progress dialog
+        if geo_paths:
+            from ..ui.dialogs.folder_loading import (
+                FolderLoadWorker, FolderProgressDialog,
+            )
+            file_names = [Path(p).name for p in geo_paths]
+            folder = str(Path(geo_paths[0]).parent)
+            worker = FolderLoadWorker(geo_paths, self)
+            dialog = FolderProgressDialog(folder, file_names, self)
+            dialog.start(worker)
+            dialog.exec()
+
+            layers = dialog.get_result()
+            if layers:
+                self.layer_manager.base_dir = str(Path(geo_paths[0]).parent)
+                for layer in layers:
+                    self.layer_manager.layers.append(layer)
+                self.layer_manager.invalidate_scene_aabb()
+                self.layer_panel.rebuild()
+                self.gl_viewport.fit_to_scene()
+                self._post_load()
+
+        # E57 files through their own pipeline
+        for p in e57_paths:
+            self._import_e57_file(p)
 
     def _on_open_folder(self):
         """Show folder dialog and load all supported files from selected directory."""
@@ -655,8 +690,26 @@ class EditorWindow(QMainWindow):
         # --- Load new folder ---
         folder_path = Path(folder)
         ply_files = sorted(folder_path.glob("*.ply"))
-        for p in ply_files:
-            self._load_file(str(p), fit_camera=False)
+
+        if ply_files:
+            from ..ui.dialogs.folder_loading import (
+                FolderLoadWorker, FolderProgressDialog,
+            )
+            file_paths = [str(p) for p in ply_files]
+            file_names = [p.name for p in ply_files]
+            worker = FolderLoadWorker(file_paths, self)
+            dialog = FolderProgressDialog(folder, file_names, self)
+            dialog.start(worker)
+            dialog.exec()
+
+            layers = dialog.get_result()
+            if layers:
+                self.layer_manager.base_dir = str(folder_path)
+                for layer in layers:
+                    self.layer_manager.layers.append(layer)
+                self.layer_manager.invalidate_scene_aabb()
+                self.layer_panel.rebuild()
+
         manifest_path = folder_path / "layers.json"
         if manifest_path.exists():
             try:
