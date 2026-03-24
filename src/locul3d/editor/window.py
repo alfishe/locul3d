@@ -269,7 +269,7 @@ class EditorWindow(QMainWindow):
 
         # View toggles
         self.act_layer_colors = QAction(
-            "Layer Colors", self, checkable=True, checked=True
+            "Layer Colors", self, checkable=True, checked=False
         )
         self.act_layer_colors.triggered.connect(self._on_toggle_layer_colors)
         toolbar.addAction(self.act_layer_colors)

@@ -92,7 +92,7 @@ class BaseGLViewport(QOpenGLWidget):
         self.show_axes = True
         self.show_grid = True
         self.use_layer_colors = (
-            True  # True = use layer.color; False = use per-vertex RGB
+            False  # False = per-vertex RGB by default; folder mode sets True
         )
         self.fps_movement = (
             False  # True = WASD/QE moves camera; False = scene correction
