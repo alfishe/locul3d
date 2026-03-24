@@ -2,13 +2,23 @@
 
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QVBoxLayout, QLabel, QCheckBox, QSlider,
-    QWidget, QPushButton, QScrollArea, QSizePolicy,
+    QWidget, QPushButton, QScrollArea, QSizePolicy, QColorDialog,
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCursor, QColor
+from PySide6.QtGui import QCursor, QColor, QMouseEvent
 
 from ...core.layer import LayerData, LayerManager
 from ...core.constants import COLORS
+
+
+class _ClickableLabel(QLabel):
+    """QLabel that emits clicked on mouse press."""
+    clicked = Signal()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        event.accept()  # consume — don't propagate to parent row
 
 
 class LayerRowWidget(QFrame):
@@ -53,20 +63,14 @@ class LayerRowWidget(QFrame):
         self.checkbox.toggled.connect(self._on_visibility)
         layout.addWidget(self.checkbox)
 
-        # Color indicator — simple styled label (not the full ColorSwatch
-        # which contains a 40x40 QPushButton that breaks compact rows)
-        swatch = QLabel()
-        swatch.setFixedSize(16, 12)
-        if layer.color:
-            r, g, b = [int(c * 255) for c in layer.color[:3]]
-            sc = f"rgb({r},{g},{b})"
-        else:
-            sc = "#b4b4c8"
-        swatch.setStyleSheet(
-            f"background: {sc}; border: 1px solid {COLORS['swatch_border']};"
-            f" border-radius: 3px;"
-        )
-        layout.addWidget(swatch)
+        # Color swatch — clickable to open color picker
+        self._swatch = _ClickableLabel()
+        self._swatch.setFixedSize(16, 12)
+        self._swatch.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._swatch.setToolTip("Click to change layer color")
+        self._swatch.clicked.connect(self._on_swatch_clicked)
+        self._update_swatch()
+        layout.addWidget(self._swatch)
 
         # Layer name
         self.name_label = QLabel(layer.name)
@@ -134,6 +138,32 @@ class LayerRowWidget(QFrame):
         """Handle opacity slider change."""
         self.layer.opacity = value / 100.0
         self.opacity_changed.emit()
+
+    def _update_swatch(self):
+        """Update swatch color from layer."""
+        if self.layer.color:
+            r, g, b = [int(c * 255) for c in self.layer.color[:3]]
+            sc = f"rgb({r},{g},{b})"
+        else:
+            sc = "#b4b4c8"
+        self._swatch.setStyleSheet(
+            f"background: {sc}; border: 1px solid {COLORS['swatch_border']};"
+            f" border-radius: 3px;"
+        )
+
+    def _on_swatch_clicked(self):
+        """Open color picker dialog."""
+        if self.layer.color:
+            r, g, b = [int(c * 255) for c in self.layer.color[:3]]
+            initial = QColor(r, g, b)
+        else:
+            initial = QColor(180, 180, 200)
+        color = QColorDialog.getColor(initial, self, "Layer Color")
+        if color.isValid():
+            self.layer.color = [color.redF(), color.greenF(), color.blueF(), 1.0]
+            self._update_swatch()
+            self.layer.evict_byte_caches()
+            self.visibility_changed.emit()  # triggers viewport redraw
 
     def sync_from_layer(self):
         """Update UI to match layer state (after programmatic changes)."""
