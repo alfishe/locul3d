@@ -27,27 +27,24 @@ class PLYImporter(ImporterPlugin):
         return Path(file_path).suffix.lower() == '.ply'
 
     def import_file(self, file_path: str) -> Optional[LayerData]:
-        """Import PLY file and return LayerData object."""
-        try:
-            import open3d as o3d
-        except ImportError:
-            return None
+        """Import PLY file and return LayerData object.
 
-        # Probe for mesh vs pointcloud
-        mesh = o3d.io.read_triangle_mesh(file_path)
-        is_mesh = len(mesh.triangles) > 0
-
+        Uses the fast binary parser for point clouds (30× faster than O3D).
+        Falls back to Open3D for meshes, ASCII PLY, etc.
+        """
+        # Default to pointcloud — load_geometry will detect mesh/wireframe
+        # and update layer_type.  This avoids the expensive O3D probe read
+        # that used to double the load time.
         layer_def = {
             "id": f"ply_{Path(file_path).stem}",
             "name": Path(file_path).name,
-            "type": "mesh" if is_mesh else "pointcloud",
+            "type": "pointcloud",
             "visible": True,
             "opacity": 1.0,
-            "color": None,  # Will use per-vertex colors if available
+            "color": None,
             "file": Path(file_path).name,
         }
 
-        # Create layer with base_dir pointing to file's directory
         layer = LayerData(layer_def, str(Path(file_path).parent))
         layer.load()
         return layer
