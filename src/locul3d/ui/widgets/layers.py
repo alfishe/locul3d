@@ -274,6 +274,7 @@ class LayerPanel(QWidget):
     layer_selected = Signal(object)
     opacity_adjusting = Signal(bool)  # True while any slider is being dragged
     pano_requested = Signal(object)   # emits LayerData for panorama enter
+
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
         self.layer_manager = layer_manager

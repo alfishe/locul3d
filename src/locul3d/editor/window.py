@@ -27,7 +27,7 @@ from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
-from ..core.geometry import BBoxItem, GapItem, PlaneItem
+from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, PlaneItem
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -763,6 +763,9 @@ class EditorWindow(QMainWindow):
             bboxes, gaps = self._parse_pipeline_context(data)
             # Store pipeline bboxes in scene-space list (post-correction rendering)
             self.gl_viewport.scene_bboxes = bboxes
+            # Remove any previous pipeline bboxes before appending new ones
+            self.annotations = [a for a in self.annotations
+                                if not getattr(a, 'scene_coords', False)]
             # Also add to annotations so they appear in the bbox panel list
             for bbox in bboxes:
                 bbox.scene_coords = True  # flag: drawn in scene space, skip in _draw_annotations
@@ -772,17 +775,19 @@ class EditorWindow(QMainWindow):
             self.bbox_panel.rebuild_list()
 
             # Build annotation groups for layer panel toggles
-            rack_bboxes = [b for b in bboxes if b.label == "rack"]
-            es_bboxes = [b for b in bboxes if b.label == "empty_space"]
-            rack_gaps = [g for g in gaps if g.color == self._RACK_GAP_ANNOT]
-            es_gaps = [g for g in gaps if g.color == self._EMPTY_GAP_ANNOT]
+            rack_bboxes = [b for b in bboxes if b.label == AnnotationCategory.RACK.value]
+            es_bboxes = [b for b in bboxes if b.label == AnnotationCategory.EMPTY_SPACE.value]
+            rack_gaps = [g for g in gaps if g.category is AnnotationCategory.RACK]
+            es_gaps = [g for g in gaps if g.category is AnnotationCategory.EMPTY_SPACE]
             groups = []
             if rack_bboxes or rack_gaps:
-                groups.append({"name": "Racks", "color": self._RACK_COLOR,
-                               "items": rack_bboxes + rack_gaps})
+                items = rack_bboxes + rack_gaps
+                groups.append({"name": "Racks", "color": items[0].color,
+                               "items": items})
             if es_bboxes or es_gaps:
-                groups.append({"name": "Empty Spaces", "color": self._EMPTY_SPACE_COLOR,
-                               "items": es_bboxes + es_gaps})
+                items = es_bboxes + es_gaps
+                groups.append({"name": "Empty Spaces", "color": items[0].color,
+                               "items": items})
             self.layer_panel.annotation_groups = groups
             self.layer_panel.rebuild()
 
@@ -795,8 +800,8 @@ class EditorWindow(QMainWindow):
             self.status_label.setText(f"Failed to load pipeline context: {exc}")
 
     # Bbox + gap annotation colors (known, so text contrast is deterministic)
-    _RACK_COLOR = [1.0, 0.5, 0.0]       # orange
-    _EMPTY_SPACE_COLOR = [1.0, 0.2, 0.2] # red
+    _RACK_COLOR = (1.0, 0.5, 0.0)       # orange
+    _EMPTY_SPACE_COLOR = (1.0, 0.2, 0.2) # red
     _RACK_GAP_ANNOT = (0.0, 0.85, 0.85)  # cyan — contrasts orange
     _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
 
@@ -815,7 +820,7 @@ class EditorWindow(QMainWindow):
         for r in racks:
             try:
                 bboxes.append(BBoxItem(
-                    label="rack", center=r["center"], size=r["size"],
+                    label=AnnotationCategory.RACK.value, center=r["center"], size=r["size"],
                     color=self._RACK_COLOR))
             except (KeyError, TypeError):
                 continue
@@ -824,7 +829,7 @@ class EditorWindow(QMainWindow):
         for es in stage5.get("empty_spaces", []):
             try:
                 bboxes.append(BBoxItem(
-                    label="empty_space", center=es["center"], size=es["size"],
+                    label=AnnotationCategory.EMPTY_SPACE.value, center=es["center"], size=es["size"],
                     color=self._EMPTY_SPACE_COLOR))
             except (KeyError, TypeError):
                 continue
@@ -866,7 +871,8 @@ class EditorWindow(QMainWindow):
                 gaps.append(GapItem(edge_a, edge_b, gap_info["gap_mm"], axis, True,
                                     anchor_a=anchor_a, anchor_b=anchor_b,
                                     tick_dir=[0, 0, 0.03],
-                                    color=self._RACK_GAP_ANNOT))
+                                    color=self._RACK_GAP_ANNOT,
+                                    category=AnnotationCategory.RACK))
             except (KeyError, IndexError, TypeError):
                 continue
 
@@ -922,7 +928,8 @@ class EditorWindow(QMainWindow):
                 gaps.append(GapItem(edge_a, edge_b, length_mm, axis, True,
                                     anchor_a=anchor_a, anchor_b=anchor_b,
                                     tick_dir=tick_dir,
-                                    color=self._EMPTY_GAP_ANNOT))
+                                    color=self._EMPTY_GAP_ANNOT,
+                                    category=AnnotationCategory.EMPTY_SPACE))
             except (KeyError, IndexError, TypeError):
                 continue
 
@@ -939,6 +946,7 @@ class EditorWindow(QMainWindow):
         self.planes.clear()
         self.gap_items.clear()
         self.gl_viewport.gaps = self.gap_items
+        self.gl_viewport.scene_bboxes = []
         self.layer_panel.annotation_groups = []
         self._undo_stack.clear()
         self._yaml_path = None
@@ -1180,9 +1188,11 @@ class EditorWindow(QMainWindow):
         # Bboxes are stored internally in world (global) coordinates.
         # For YAML persistence, inverse-transform back to scene (scanner-local)
         # coordinates so the file format stays in the original coordinate system.
-        if self.annotations:
+        user_annotations = [a for a in self.annotations
+                            if not getattr(a, 'scene_coords', False)]
+        if user_annotations:
             save_bboxes = []
-            for b in self.annotations:
+            for b in user_annotations:
                 if corr is not None and not corr.is_identity:
                     import copy
                     b_copy = copy.deepcopy(b)
