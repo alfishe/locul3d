@@ -9,7 +9,7 @@ from PySide6.QtGui import QMouseEvent
 
 from ..core.constants import COLORS, TOOL_SELECT, TOOL_MOVE, TOOL_ROTATE, TOOL_SCALE
 from ..core.constants import AXIS_COLORS, AABB_EDGES, AABB_FACES, GIZMO_HIT_PX
-from ..core.geometry import BBoxItem, PlaneItem
+from ..core.geometry import BBoxItem, GapItem, PlaneItem
 from ..core.layer import LayerManager
 from ..rendering.gl.viewport import BaseGLViewport
 from ..utils.math import project_to_screen, project_points_to_screen, ray_from_mouse, ray_aabb_intersect
@@ -38,6 +38,7 @@ class EditorViewport(BaseGLViewport):
         # Annotation data
         self.annotations: List[BBoxItem] = []
         self.planes: List[PlaneItem] = []
+        self.gaps: List[GapItem] = []
         self.selected_idx: int = -1
 
         # Tool state
@@ -83,6 +84,31 @@ class EditorViewport(BaseGLViewport):
 
     def _paintGL_inner(self):
         """Paint editor viewport with annotations overlay."""
+        # Reset GL state that QPainter (gap labels) may have corrupted
+        # on the previous frame. This ensures the fixed-function VBO
+        # pipeline works correctly for point cloud rendering.
+        try:
+            from OpenGL.GL import (glUseProgram, glBindBuffer, GL_ARRAY_BUFFER,
+                                   GL_ELEMENT_ARRAY_BUFFER, glDisable, glEnable,
+                                   GL_BLEND, GL_TEXTURE_2D, GL_DEPTH_TEST,
+                                   glDisableClientState, GL_VERTEX_ARRAY,
+                                   GL_COLOR_ARRAY, GL_NORMAL_ARRAY,
+                                   GL_TEXTURE_COORD_ARRAY, glActiveTexture,
+                                   GL_TEXTURE0, glBindTexture)
+            glUseProgram(0)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glDisableClientState(GL_COLOR_ARRAY)
+            glDisableClientState(GL_NORMAL_ARRAY)
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            glDisable(GL_TEXTURE_2D)
+            glDisable(GL_BLEND)
+            glEnable(GL_DEPTH_TEST)
+        except ImportError:
+            pass
         super()._paintGL_inner()
 
         # In immersive panorama mode, skip all annotations, bboxes,
@@ -129,6 +155,9 @@ class EditorViewport(BaseGLViewport):
         if pre_corr is not None:
             glPopMatrix()
 
+        # Gap brackets live in scene (post-correction) coordinates
+        self._draw_gap_annotations()
+
         # Scene-coord planes: drawn inside correction (already active)
         scene_planes = [p for p in self.planes if p.visible and not p.global_coords]
         if scene_planes:
@@ -141,6 +170,7 @@ class EditorViewport(BaseGLViewport):
             glLoadMatrixf(pre_corr)
             self._draw_planes(global_planes)
             glPopMatrix()
+
 
     def _draw_annotations(self):
         """Draw bounding box annotations (wireframe + optional filled faces)."""
@@ -190,13 +220,12 @@ class EditorViewport(BaseGLViewport):
                 continue
 
             selected = (i == self.selected_idx)
-            glLineWidth(3.0 if selected else 1.5)
+            glLineWidth(4.0 if selected else 3.0)
 
             if selected:
                 glColor4f(1.0, 1.0, 0.0, 1.0)
             else:
-                r, g, b = bbox.color[:3]
-                glColor4f(r, g, b, 0.85)
+                glColor4f(1.0, 0.5, 0.0, 1.0)  # orange for all bboxes
 
             corners = bbox.corners()
             glBegin(GL_LINES)
@@ -382,6 +411,124 @@ class EditorViewport(BaseGLViewport):
 
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
+
+    def _draw_gap_annotations(self):
+        """Draw red bracket lines for gap annotations between racks."""
+        visible_gaps = [g for g in self.gaps if g.visible]
+        if not visible_gaps:
+            return
+
+        try:
+            from OpenGL.GL import (glDisable, glEnable, glLineWidth, glBegin, glEnd,
+                                   GL_DEPTH_TEST)
+        except ImportError:
+            return
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        glLineWidth(3.0)
+        glColor4f(1.0, 0.2, 0.2, 1.0)
+
+        arrow_sz = 0.02  # arrowhead size
+        tick_up = 0.03   # how far vertical lines extend above arrow
+        barb_z = np.array([0, 0, arrow_sz * 0.5])
+
+        for gap in visible_gaps:
+            a = gap.edge_a  # at arrow_z level
+            b = gap.edge_b
+
+            # Bottom of vertical lines: each rack's actual top
+            a_bottom = a.copy(); a_bottom[2] = gap.rack_top_a_z
+            b_bottom = b.copy(); b_bottom[2] = gap.rack_top_b_z
+            # Top of vertical lines: above the arrow
+            a_top = a.copy(); a_top[2] += tick_up
+            b_top = b.copy(); b_top[2] += tick_up
+
+            # Arrow direction vector (a→b)
+            horiz = b - a
+            length = np.linalg.norm(horiz[:2])  # XY distance only
+            if length < 1e-6:
+                continue
+            d = horiz.copy(); d[2] = 0; d /= np.linalg.norm(d)
+            d_arrow = d * arrow_sz
+
+            glBegin(GL_LINES)
+            # Left vertical line
+            glVertex3dv(a_top)
+            glVertex3dv(a_bottom)
+            # Right vertical line
+            glVertex3dv(b_top)
+            glVertex3dv(b_bottom)
+            # Horizontal arrow shaft
+            glVertex3dv(a)
+            glVertex3dv(b)
+            # Left arrowhead
+            glVertex3dv(a); glVertex3dv(a + d_arrow + barb_z)
+            glVertex3dv(a); glVertex3dv(a + d_arrow - barb_z)
+            # Right arrowhead
+            glVertex3dv(b); glVertex3dv(b - d_arrow + barb_z)
+            glVertex3dv(b); glVertex3dv(b - d_arrow - barb_z)
+            glEnd()
+
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
+        # Store scene-space modelview for paintEvent label projection
+        from OpenGL.GL import glGetFloatv, GL_MODELVIEW_MATRIX
+        self._gl_modelview_scene = np.array(glGetFloatv(GL_MODELVIEW_MATRIX), dtype=np.float64)
+
+    def paintEvent(self, event):
+        """Paint GL content then overlay gap labels with QPainter."""
+        super().paintEvent(event)
+
+        visible_gaps = [g for g in self.gaps if g.visible]
+        mv = getattr(self, '_gl_modelview_scene', None)
+        proj = self._gl_projection
+        vp = self._gl_viewport
+        if not visible_gaps or mv is None or proj is None or vp is None:
+            return
+
+        from PySide6.QtGui import QPainter, QFont, QColor
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        font = QFont()
+        font.setBold(True)
+        font.setPointSize(14)
+        painter.setFont(font)
+
+        # White outline for readability over point cloud
+        outline = QColor(255, 255, 255)
+        text_color = QColor(220, 30, 30)
+
+        for gap in visible_gaps:
+            sa_x, sa_y = project_to_screen(gap.edge_a, mv, proj, vp)
+            sb_x, sb_y = project_to_screen(gap.edge_b, mv, proj, vp)
+            mid = (gap.edge_a + gap.edge_b) / 2.0
+            sx, sy = project_to_screen(mid, mv, proj, vp)
+
+            text = f"{gap.gap_mm:.0f}mm"
+            fm = painter.fontMetrics()
+            tw = fm.horizontalAdvance(text)
+
+            bracket_px = abs(sb_x - sa_x)
+            if tw + 4 < bracket_px:
+                tx, ty = int(sx - tw / 2), int(sy - 8)
+            else:
+                top_mid = mid.copy()
+                top_mid[2] = gap.edge_a[2] + 0.03
+                px, py = project_to_screen(top_mid, mv, proj, vp)
+                tx, ty = int(px - tw / 2), int(py - 4)
+
+            # Draw white outline then red text for contrast
+            painter.setPen(outline)
+            for dx, dy in [(-1,-1),(1,-1),(-1,1),(1,1),(0,-1),(0,1),(-1,0),(1,0)]:
+                painter.drawText(tx + dx, ty + dy, text)
+            painter.setPen(text_color)
+            painter.drawText(tx, ty, text)
+
+        painter.end()
 
     def _gizmo_len(self, bbox):
         return max(0.3, float(np.max(bbox.size)) * 0.6)

@@ -5,6 +5,22 @@ import numpy as np
 from typing import Optional
 
 
+class GapItem:
+    """A gap annotation between two adjacent rack edges."""
+
+    def __init__(self, edge_a=None, edge_b=None, gap_mm=0.0, axis=0, visible=True,
+                 rack_top_a_z=0.0, rack_top_b_z=0.0):
+        self.edge_a = np.array(edge_a if edge_a is not None else [0, 0, 0],
+                               dtype=np.float64)
+        self.edge_b = np.array(edge_b if edge_b is not None else [0, 0, 0],
+                               dtype=np.float64)
+        self.gap_mm = float(gap_mm)
+        self.axis = int(axis)  # 0=X, 1=Y corridor axis
+        self.visible = visible
+        self.rack_top_a_z = float(rack_top_a_z)  # top Z of rack A
+        self.rack_top_b_z = float(rack_top_b_z)  # top Z of rack B
+
+
 class BBoxItem:
     """One annotation bounding box with position, size, and Z-rotation."""
 

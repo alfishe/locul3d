@@ -712,32 +712,15 @@ class BaseGLViewport(QOpenGLWidget):
             return
 
         glDisable(GL_LIGHTING)
-        glLineWidth(2.0)
+        glLineWidth(3.0)
 
-        # Determine coloring mode
-        use_uniform = self.use_layer_colors and layer.color is not None
-        has_vtx_colors = False
-
-        if use_uniform:
-            r, g, b = layer.color[:3]
-            glColor4f(r, g, b, layer.opacity)
-        elif layer.colors is not None or getattr(layer, 'colors_u8', None) is not None:
-            has_vtx_colors = True
-        else:
-            glColor4f(1.0, 0.3, 0.3, layer.opacity)
+        # Wireframe overlays always use orange for visibility
+        glColor4f(1.0, 0.5, 0.0, layer.opacity)
 
         vbo_lines = self._get_or_create_vbo(layer.id, "lines", lines)
         glBindBuffer(GL_ARRAY_BUFFER, vbo_lines)
         glEnableClientState(GL_VERTEX_ARRAY)
         glVertexPointer(3, GL_FLOAT, 0, None)
-
-        if has_vtx_colors:
-            colors = layer.get_colors_array()
-            if colors is not None:
-                vbo_rgb = self._get_or_create_vbo(layer.id, "rgb", colors)
-                glBindBuffer(GL_ARRAY_BUFFER, vbo_rgb)
-                glEnableClientState(GL_COLOR_ARRAY)
-                glColorPointer(3, GL_FLOAT, 0, None)
 
         needs_blend = layer.opacity < 0.99
         if needs_blend:
