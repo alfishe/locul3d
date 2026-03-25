@@ -27,7 +27,7 @@ from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
-from ..core.geometry import BBoxItem, PlaneItem
+from ..core.geometry import BBoxItem, GapItem, PlaneItem
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -122,6 +122,7 @@ class EditorWindow(QMainWindow):
         self._yaml_path: Optional[str] = annotations_path
         self.annotations: List[BBoxItem] = []
         self.planes: List[PlaneItem] = []
+        self.gap_items: List[GapItem] = []
         self._color_idx = 0
         self._plane_color_idx = 0
         self._undo_stack = []
@@ -350,6 +351,11 @@ class EditorWindow(QMainWindow):
         act_correction.setToolTip("Adjust scene rotation and shift for axis alignment")
         act_correction.triggered.connect(self._on_scene_correction)
         toolbar.addAction(act_correction)
+
+        act_pipeline = QAction("Load Pipeline Context", self)
+        act_pipeline.setToolTip("Load pipeline_context.yaml to display gap annotations between racks")
+        act_pipeline.triggered.connect(self._on_load_pipeline_context)
+        toolbar.addAction(act_pipeline)
 
         toolbar.addSeparator()
         exp_btn = QToolButton()
@@ -735,6 +741,229 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
         self.setWindowTitle(f"Locul3D Editor — {folder_path.name}")
 
+    # ------------------------------------------------------------------
+    # Pipeline context (gap annotations)
+    # ------------------------------------------------------------------
+
+    def _on_load_pipeline_context(self):
+        """Open file dialog to load pipeline_context.yaml and display gap annotations."""
+        if not HAS_YAML:
+            self.status_label.setText("PyYAML not installed — cannot load pipeline context")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Pipeline Context", "",
+            "YAML files (*.yaml *.yml);;All files (*)")
+        if not path:
+            return
+
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+            bboxes, gaps = self._parse_pipeline_context(data)
+            # Store pipeline bboxes in scene-space list (post-correction rendering)
+            self.gl_viewport.scene_bboxes = bboxes
+            # Also add to annotations so they appear in the bbox panel list
+            for bbox in bboxes:
+                bbox.scene_coords = True  # flag: drawn in scene space, skip in _draw_annotations
+                self.annotations.append(bbox)
+            self.gap_items = gaps
+            self.gl_viewport.gaps = gaps
+            self.bbox_panel.rebuild_list()
+            self.gl_viewport.update()
+            n_racks = sum(1 for b in bboxes if b.label == "rack")
+            n_es = sum(1 for b in bboxes if b.label == "empty_space")
+            self.status_label.setText(
+                f"Pipeline: {n_racks} racks, {n_es} empty spaces, {len(gaps)} gap annotations")
+        except Exception as exc:
+            self.status_label.setText(f"Failed to load pipeline context: {exc}")
+
+    # Bbox + gap annotation colors (known, so text contrast is deterministic)
+    _RACK_COLOR = [1.0, 0.5, 0.0]       # orange
+    _EMPTY_SPACE_COLOR = [1.0, 0.2, 0.2] # red
+    _RACK_GAP_ANNOT = (0.0, 0.85, 0.85)  # cyan — contrasts orange
+    _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
+
+    def _parse_pipeline_context(self, data):
+        """Parse pipeline_context.yaml → (list[BBoxItem], list[GapItem]).
+
+        Supports two rack data sources (tried in order):
+          1. stage3_rack.rack_regions — actual pipeline output (bbox min/max)
+          2. stage4.racks — refined objects (center/dimensions)
+
+        Gap annotations come from stage5 (rack_gaps / empty_spaces) when
+        present.  Corridor axis is inferred from stage3_rack, stage2, or
+        stage5 metadata.
+        """
+        # --- Determine corridor axis ---
+        corridor_axis = "X"
+        for src in (
+            data.get("stage3_rack", {}),
+            data.get("stage2", {}).get("corridors", {}),
+            data.get("stage2", {}).get("corridors_sr", {}),
+            data.get("stage5", {}),
+        ):
+            if isinstance(src, dict) and "corridor_axis" in src:
+                corridor_axis = src["corridor_axis"]
+                break
+        axis = 0 if corridor_axis == "X" else 1
+        cross_axis = 1 - axis
+
+        bboxes = []
+        gaps = []
+        racks_for_gaps = []  # unified center/dims list for gap computation
+
+        # --- Source 1: stage3_rack.rack_regions (min/max bbox format) ---
+        rack_regions = data.get("stage3_rack", {}).get("rack_regions", [])
+        for rr in rack_regions:
+            try:
+                bb = rr["bbox"]
+                bb_min = bb["min"]
+                bb_max = bb["max"]
+                center = [
+                    (bb_min[0] + bb_max[0]) / 2,
+                    (bb_min[1] + bb_max[1]) / 2,
+                    (bb_min[2] + bb_max[2]) / 2,
+                ]
+                dims = [
+                    bb_max[0] - bb_min[0],
+                    bb_max[1] - bb_min[1],
+                    bb_max[2] - bb_min[2],
+                ]
+                bboxes.append(BBoxItem(
+                    label="rack", center=center, size=dims,
+                    color=self._RACK_COLOR))
+                racks_for_gaps.append({"center": center, "dims": dims})
+            except (KeyError, TypeError):
+                continue
+
+        # --- Source 2: stage4.racks (center/dimensions format) ---
+        if not racks_for_gaps:
+            for r in data.get("stage4", {}).get("racks", []):
+                try:
+                    dims = r.get("dimensions", r.get("size"))
+                    if dims is None:
+                        continue
+                    bboxes.append(BBoxItem(
+                        label="rack", center=r["center"], size=dims,
+                        color=self._RACK_COLOR))
+                    racks_for_gaps.append({"center": r["center"], "dims": dims})
+                except (KeyError, TypeError):
+                    continue
+
+        # --- Empty space bboxes (red) — from stage5 ---
+        stage5 = data.get("stage5", {})
+        for es in stage5.get("empty_spaces", []):
+            try:
+                dims = es.get("dimensions", es.get("size"))
+                if dims is None:
+                    continue
+                bboxes.append(BBoxItem(
+                    label="empty_space", center=es["center"], size=dims,
+                    color=self._EMPTY_SPACE_COLOR))
+            except (KeyError, TypeError):
+                continue
+
+        # --- Rack gaps (bracket above racks, ticks down to rack tops) ---
+        for gap_info in stage5.get("rack_gaps", []):
+            try:
+                a_idx = gap_info["rack_a_index"]
+                b_idx = gap_info["rack_b_index"]
+            except (KeyError, TypeError):
+                continue
+            if not (0 <= a_idx < len(racks_for_gaps)
+                    and 0 <= b_idx < len(racks_for_gaps)):
+                continue
+
+            try:
+                a = racks_for_gaps[a_idx]
+                b = racks_for_gaps[b_idx]
+                ac, asz = a["center"], a["dims"]
+                bc, bsz = b["center"], b["dims"]
+
+                a_right = ac[axis] + asz[axis] / 2
+                b_left = bc[axis] - bsz[axis] / 2
+                cross = (ac[cross_axis] + bc[cross_axis]) / 2
+                a_top_z = ac[2] + asz[2] / 2
+                b_top_z = bc[2] + bsz[2] / 2
+                arrow_z = max(a_top_z, b_top_z) + 0.05
+
+                if axis == 1:
+                    edge_a = [cross, a_right, arrow_z]
+                    edge_b = [cross, b_left, arrow_z]
+                    anchor_a = [cross, a_right, a_top_z]
+                    anchor_b = [cross, b_left, b_top_z]
+                else:
+                    edge_a = [a_right, cross, arrow_z]
+                    edge_b = [b_left, cross, arrow_z]
+                    anchor_a = [a_right, cross, a_top_z]
+                    anchor_b = [b_left, cross, b_top_z]
+
+                gaps.append(GapItem(edge_a, edge_b, gap_info["gap_mm"], axis, True,
+                                    anchor_a=anchor_a, anchor_b=anchor_b,
+                                    tick_dir=[0, 0, 0.03],
+                                    color=self._RACK_GAP_ANNOT))
+            except (KeyError, IndexError, TypeError):
+                continue
+
+        # --- Empty space gaps (bracket at front face) ---
+        all_rack_rows = []
+        for rr in rack_regions:
+            try:
+                bbox = rr["bbox"]
+                rr_min = bbox["min"]
+                rr_max = bbox["max"]
+                side = rr.get("side", "right")
+                cross_center = (rr_min[cross_axis] + rr_max[cross_axis]) / 2
+                depth = rr_max[cross_axis] - rr_min[cross_axis]
+                if side == "right":
+                    front_x = cross_center - depth / 2
+                    sign = -1
+                else:
+                    front_x = cross_center + depth / 2
+                    sign = 1
+                all_rack_rows.append((cross_center, front_x, sign))
+            except (KeyError, TypeError):
+                continue
+
+        for es in stage5.get("empty_spaces", []):
+            try:
+                center = es["center"]
+                along_min = es["along_min"]
+                along_max = es["along_max"]
+                length_mm = es["length_mm"]
+
+                if not all_rack_rows:
+                    continue
+                es_cross = center[cross_axis]
+                _, front_x, sign = min(all_rack_rows, key=lambda r: abs(r[0] - es_cross))
+                offset = 0.08
+                mid_z = center[2]
+
+                if axis == 1:
+                    bracket_x = front_x + sign * offset
+                    edge_a = [bracket_x, along_min, mid_z]
+                    edge_b = [bracket_x, along_max, mid_z]
+                    anchor_a = [front_x, along_min, mid_z]
+                    anchor_b = [front_x, along_max, mid_z]
+                    tick_dir = [sign * 0.03, 0, 0]
+                else:
+                    bracket_y = front_x + sign * offset
+                    edge_a = [along_min, bracket_y, mid_z]
+                    edge_b = [along_max, bracket_y, mid_z]
+                    anchor_a = [along_min, front_x, mid_z]
+                    anchor_b = [along_max, front_x, mid_z]
+                    tick_dir = [0, sign * 0.03, 0]
+
+                gaps.append(GapItem(edge_a, edge_b, length_mm, axis, True,
+                                    anchor_a=anchor_a, anchor_b=anchor_b,
+                                    tick_dir=tick_dir,
+                                    color=self._EMPTY_GAP_ANNOT))
+            except (KeyError, IndexError, TypeError):
+                continue
+
+        return bboxes, gaps
+
     def _on_clear_scene(self):
         """Remove all layers and annotations from the scene."""
         self.gl_viewport.delete_all_vbos()
@@ -744,6 +973,8 @@ class EditorWindow(QMainWindow):
         self.layer_manager.invalidate_scene_aabb()
         self.annotations.clear()
         self.planes.clear()
+        self.gap_items.clear()
+        self.gl_viewport.gaps = self.gap_items
         self._undo_stack.clear()
         self._yaml_path = None
         self._color_idx = 0
