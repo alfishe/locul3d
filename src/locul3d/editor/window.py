@@ -168,7 +168,6 @@ class EditorWindow(QMainWindow):
         self.layer_panel.layer_selected.connect(self._on_layer_selected)
         self.layer_panel.opacity_adjusting.connect(self._on_opacity_adjusting)
         self.layer_panel.pano_requested.connect(self._on_pano_requested)
-        self.layer_panel.annotation_changed.connect(self.gl_viewport.update)
 
         self.gl_viewport.point_picked.connect(self._on_point_picked)
         self.gl_viewport.bbox_selected.connect(self._on_bbox_selected)

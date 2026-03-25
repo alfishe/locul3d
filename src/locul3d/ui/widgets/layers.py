@@ -274,8 +274,6 @@ class LayerPanel(QWidget):
     layer_selected = Signal(object)
     opacity_adjusting = Signal(bool)  # True while any slider is being dragged
     pano_requested = Signal(object)   # emits LayerData for panorama enter
-    annotation_changed = Signal()
-
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
         self.layer_manager = layer_manager
@@ -350,7 +348,7 @@ class LayerPanel(QWidget):
 
         # --- Annotations section ---
         if self.annotation_groups:
-            ann_header = QLabel(f"  Annotations")
+            ann_header = QLabel("  Annotations")
             ann_header.setStyleSheet(
                 f"color: {COLORS['text']}; font-size: 11px; font-weight: bold; "
                 f"padding: 6px 0 3px 0; border-bottom: 1px solid {COLORS['border']};"
@@ -358,7 +356,7 @@ class LayerPanel(QWidget):
             self._scroll_layout.addWidget(ann_header)
             for group in self.annotation_groups:
                 row = AnnotationRowWidget(group)
-                row.visibility_changed.connect(self._on_annotation_changed)
+                row.visibility_changed.connect(self._on_layer_changed)
                 self._scroll_layout.addWidget(row)
 
         self._scroll_layout.addStretch()
@@ -393,9 +391,6 @@ class LayerPanel(QWidget):
 
     def _on_layer_changed(self):
         self.layer_changed.emit()
-
-    def _on_annotation_changed(self):
-        self.annotation_changed.emit()
 
     def _on_layer_selected(self, layer):
         """Handle a layer row being clicked - highlight and emit selection."""
