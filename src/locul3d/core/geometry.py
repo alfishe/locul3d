@@ -14,7 +14,7 @@ class GapItem:
     """
 
     def __init__(self, edge_a=None, edge_b=None, gap_mm=0.0, axis=0, visible=True,
-                 anchor_a=None, anchor_b=None, tick_dir=None):
+                 anchor_a=None, anchor_b=None, tick_dir=None, color=None):
         self.edge_a = np.array(edge_a if edge_a is not None else [0, 0, 0],
                                dtype=np.float64)
         self.edge_b = np.array(edge_b if edge_b is not None else [0, 0, 0],
@@ -30,6 +30,8 @@ class GapItem:
         # Direction to extend ticks past the bracket (away from bbox)
         self.tick_dir = np.array(tick_dir if tick_dir is not None else [0, 0, 0.03],
                                  dtype=np.float64)
+        # Annotation color (RGB 0-1); None = use default
+        self.color = tuple(color) if color is not None else None
 
 
 class BBoxItem:

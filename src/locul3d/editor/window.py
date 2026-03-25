@@ -760,23 +760,58 @@ class EditorWindow(QMainWindow):
         try:
             with open(path, "r") as f:
                 data = yaml.safe_load(f)
-            gaps = self._parse_pipeline_gaps(data)
+            bboxes, gaps = self._parse_pipeline_context(data)
+            # Store pipeline bboxes in scene-space list (post-correction rendering)
+            self.gl_viewport.scene_bboxes = bboxes
+            # Also add to annotations so they appear in the bbox panel list
+            for bbox in bboxes:
+                bbox.scene_coords = True  # flag: drawn in scene space, skip in _draw_annotations
+                self.annotations.append(bbox)
             self.gap_items = gaps
             self.gl_viewport.gaps = gaps
+            self.bbox_panel.rebuild_list()
             self.gl_viewport.update()
-            self.status_label.setText(f"Loaded {len(gaps)} gap annotations from pipeline context")
+            n_racks = sum(1 for b in bboxes if b.label == "rack")
+            n_es = sum(1 for b in bboxes if b.label == "empty_space")
+            self.status_label.setText(
+                f"Pipeline: {n_racks} racks, {n_es} empty spaces, {len(gaps)} gap annotations")
         except Exception as exc:
             self.status_label.setText(f"Failed to load pipeline context: {exc}")
 
-    def _parse_pipeline_gaps(self, data):
-        """Extract gap + empty-space annotations from pipeline_context.yaml."""
+    # Bbox + gap annotation colors (known, so text contrast is deterministic)
+    _RACK_COLOR = [1.0, 0.5, 0.0]       # orange
+    _EMPTY_SPACE_COLOR = [1.0, 0.2, 0.2] # red
+    _RACK_GAP_ANNOT = (0.0, 0.85, 0.85)  # cyan — contrasts orange
+    _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
+
+    def _parse_pipeline_context(self, data):
+        """Parse pipeline_context.yaml → (list[BBoxItem], list[GapItem])."""
         racks = data.get("stage4", {}).get("racks", [])
         stage5 = data.get("stage5", {})
         corridor_axis = stage5.get("corridor_axis", "X")
         axis = 0 if corridor_axis == "X" else 1
         cross_axis = 1 - axis
 
-        items = []
+        bboxes = []
+        gaps = []
+
+        # --- Rack bboxes (orange) ---
+        for r in racks:
+            try:
+                bboxes.append(BBoxItem(
+                    label="rack", center=r["center"], size=r["size"],
+                    color=self._RACK_COLOR))
+            except (KeyError, TypeError):
+                continue
+
+        # --- Empty space bboxes (red) ---
+        for es in stage5.get("empty_spaces", []):
+            try:
+                bboxes.append(BBoxItem(
+                    label="empty_space", center=es["center"], size=es["size"],
+                    color=self._EMPTY_SPACE_COLOR))
+            except (KeyError, TypeError):
+                continue
 
         # --- Rack gaps (bracket above racks, ticks down to rack tops) ---
         for gap_info in stage5.get("rack_gaps", []):
@@ -794,7 +829,6 @@ class EditorWindow(QMainWindow):
                 ac, asz = a["center"], a["size"]
                 bc, bsz = b["center"], b["size"]
 
-                # Facing edges along corridor axis
                 a_right = ac[axis] + asz[axis] / 2
                 b_left = bc[axis] - bsz[axis] / 2
                 cross = (ac[cross_axis] + bc[cross_axis]) / 2
@@ -813,14 +847,14 @@ class EditorWindow(QMainWindow):
                     anchor_a = [a_right, cross, a_top_z]
                     anchor_b = [b_left, cross, b_top_z]
 
-                items.append(GapItem(edge_a, edge_b, gap_info["gap_mm"], axis, True,
-                                     anchor_a=anchor_a, anchor_b=anchor_b,
-                                     tick_dir=[0, 0, 0.03]))
+                gaps.append(GapItem(edge_a, edge_b, gap_info["gap_mm"], axis, True,
+                                    anchor_a=anchor_a, anchor_b=anchor_b,
+                                    tick_dir=[0, 0, 0.03],
+                                    color=self._RACK_GAP_ANNOT))
             except (KeyError, IndexError, TypeError):
                 continue
 
-        # --- Empty spaces (bracket at front face, ticks toward rack interior) ---
-        # Build flat list of rack regions: (cross_center, front_x, sign)
+        # --- Empty space gaps (bracket at front face) ---
         all_rack_rows = []
         for rr in data.get("stage3_rack", {}).get("rack_regions", []):
             try:
@@ -830,10 +864,9 @@ class EditorWindow(QMainWindow):
                 side = rr.get("side", "right")
                 cross_center = (rr_min[cross_axis] + rr_max[cross_axis]) / 2
                 depth = rr_max[cross_axis] - rr_min[cross_axis]
-                # Front face: side facing corridor
                 if side == "right":
                     front_x = cross_center - depth / 2
-                    sign = -1  # ticks extend away from corridor
+                    sign = -1
                 else:
                     front_x = cross_center + depth / 2
                     sign = 1
@@ -844,17 +877,15 @@ class EditorWindow(QMainWindow):
         for es in stage5.get("empty_spaces", []):
             try:
                 center = es["center"]
-                size = es["size"]
                 along_min = es["along_min"]
                 along_max = es["along_max"]
                 length_mm = es["length_mm"]
 
                 if not all_rack_rows:
                     continue
-                # Match to nearest rack row by cross-axis position
                 es_cross = center[cross_axis]
                 _, front_x, sign = min(all_rack_rows, key=lambda r: abs(r[0] - es_cross))
-                offset = 0.08  # bracket offset from face
+                offset = 0.08
                 mid_z = center[2]
 
                 if axis == 1:
@@ -872,13 +903,14 @@ class EditorWindow(QMainWindow):
                     anchor_b = [along_max, front_x, mid_z]
                     tick_dir = [0, sign * 0.03, 0]
 
-                items.append(GapItem(edge_a, edge_b, length_mm, axis, True,
-                                     anchor_a=anchor_a, anchor_b=anchor_b,
-                                     tick_dir=tick_dir))
+                gaps.append(GapItem(edge_a, edge_b, length_mm, axis, True,
+                                    anchor_a=anchor_a, anchor_b=anchor_b,
+                                    tick_dir=tick_dir,
+                                    color=self._EMPTY_GAP_ANNOT))
             except (KeyError, IndexError, TypeError):
                 continue
 
-        return items
+        return bboxes, gaps
 
     def _on_clear_scene(self):
         """Remove all layers and annotations from the scene."""
