@@ -769,14 +769,17 @@ class EditorWindow(QMainWindow):
             self.status_label.setText(f"Failed to load pipeline context: {exc}")
 
     def _parse_pipeline_gaps(self, data):
-        """Extract gap annotations from pipeline_context.yaml stage4+stage5 data."""
+        """Extract gap + empty-space annotations from pipeline_context.yaml."""
         racks = data.get("stage4", {}).get("racks", [])
         stage5 = data.get("stage5", {})
         corridor_axis = stage5.get("corridor_axis", "X")
         axis = 0 if corridor_axis == "X" else 1
+        cross_axis = 1 - axis
 
-        gaps = []
-        for gap_info in stage5.get("gaps", []):
+        items = []
+
+        # --- Rack gaps (bracket above racks, ticks down to rack tops) ---
+        for gap_info in stage5.get("rack_gaps", []):
             try:
                 a_idx = gap_info["rack_a_index"]
                 b_idx = gap_info["rack_b_index"]
@@ -788,35 +791,94 @@ class EditorWindow(QMainWindow):
             try:
                 a = racks[a_idx]
                 b = racks[b_idx]
-                a_center = a["center"]
-                a_size = a["size"]
-                b_center = b["center"]
-                b_size = b["size"]
+                ac, asz = a["center"], a["size"]
+                bc, bsz = b["center"], b["size"]
 
                 # Facing edges along corridor axis
-                a_right = a_center[axis] + a_size[axis] / 2
-                b_left = b_center[axis] - b_size[axis] / 2
-
-                # Cross-axis position (average of both racks)
-                cross = (a_center[1 - axis] + b_center[1 - axis]) / 2
-                # Z positions: each rack's top, and arrow level above both
-                a_top_z = a_center[2] + a_size[2] / 2
-                b_top_z = b_center[2] + b_size[2] / 2
+                a_right = ac[axis] + asz[axis] / 2
+                b_left = bc[axis] - bsz[axis] / 2
+                cross = (ac[cross_axis] + bc[cross_axis]) / 2
+                a_top_z = ac[2] + asz[2] / 2
+                b_top_z = bc[2] + bsz[2] / 2
                 arrow_z = max(a_top_z, b_top_z) + 0.05
 
                 if axis == 1:
                     edge_a = [cross, a_right, arrow_z]
                     edge_b = [cross, b_left, arrow_z]
+                    anchor_a = [cross, a_right, a_top_z]
+                    anchor_b = [cross, b_left, b_top_z]
                 else:
                     edge_a = [a_right, cross, arrow_z]
                     edge_b = [b_left, cross, arrow_z]
+                    anchor_a = [a_right, cross, a_top_z]
+                    anchor_b = [b_left, cross, b_top_z]
 
-                gaps.append(GapItem(edge_a, edge_b, gap_info["gap_mm"], axis, True,
-                                    rack_top_a_z=a_top_z, rack_top_b_z=b_top_z))
+                items.append(GapItem(edge_a, edge_b, gap_info["gap_mm"], axis, True,
+                                     anchor_a=anchor_a, anchor_b=anchor_b,
+                                     tick_dir=[0, 0, 0.03]))
             except (KeyError, IndexError, TypeError):
                 continue
 
-        return gaps
+        # --- Empty spaces (bracket at front face, ticks toward rack interior) ---
+        # Build flat list of rack regions: (cross_center, front_x, sign)
+        all_rack_rows = []
+        for rr in data.get("stage3_rack", {}).get("rack_regions", []):
+            try:
+                bbox = rr["bbox"]
+                rr_min = bbox["min"]
+                rr_max = bbox["max"]
+                side = rr.get("side", "right")
+                cross_center = (rr_min[cross_axis] + rr_max[cross_axis]) / 2
+                depth = rr_max[cross_axis] - rr_min[cross_axis]
+                # Front face: side facing corridor
+                if side == "right":
+                    front_x = cross_center - depth / 2
+                    sign = -1  # ticks extend away from corridor
+                else:
+                    front_x = cross_center + depth / 2
+                    sign = 1
+                all_rack_rows.append((cross_center, front_x, sign))
+            except (KeyError, TypeError):
+                continue
+
+        for es in stage5.get("empty_spaces", []):
+            try:
+                center = es["center"]
+                size = es["size"]
+                along_min = es["along_min"]
+                along_max = es["along_max"]
+                length_mm = es["length_mm"]
+
+                if not all_rack_rows:
+                    continue
+                # Match to nearest rack row by cross-axis position
+                es_cross = center[cross_axis]
+                _, front_x, sign = min(all_rack_rows, key=lambda r: abs(r[0] - es_cross))
+                offset = 0.08  # bracket offset from face
+                mid_z = center[2]
+
+                if axis == 1:
+                    bracket_x = front_x + sign * offset
+                    edge_a = [bracket_x, along_min, mid_z]
+                    edge_b = [bracket_x, along_max, mid_z]
+                    anchor_a = [front_x, along_min, mid_z]
+                    anchor_b = [front_x, along_max, mid_z]
+                    tick_dir = [sign * 0.03, 0, 0]
+                else:
+                    bracket_y = front_x + sign * offset
+                    edge_a = [along_min, bracket_y, mid_z]
+                    edge_b = [along_max, bracket_y, mid_z]
+                    anchor_a = [along_min, front_x, mid_z]
+                    anchor_b = [along_max, front_x, mid_z]
+                    tick_dir = [0, sign * 0.03, 0]
+
+                items.append(GapItem(edge_a, edge_b, length_mm, axis, True,
+                                     anchor_a=anchor_a, anchor_b=anchor_b,
+                                     tick_dir=tick_dir))
+            except (KeyError, IndexError, TypeError):
+                continue
+
+        return items
 
     def _on_clear_scene(self):
         """Remove all layers and annotations from the scene."""

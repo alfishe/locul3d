@@ -437,44 +437,48 @@ class EditorViewport(BaseGLViewport):
         glColor4f(1.0, 0.2, 0.2, 1.0)
 
         arrow_sz = 0.02  # arrowhead size
-        tick_up = 0.03   # how far vertical lines extend above arrow
-        barb_z = np.array([0, 0, arrow_sz * 0.5])
 
         for gap in visible_gaps:
-            a = gap.edge_a  # at arrow_z level
-            b = gap.edge_b
+            a = gap.edge_a  # bracket endpoint A
+            b = gap.edge_b  # bracket endpoint B
 
-            # Bottom of vertical lines: each rack's actual top
-            a_bottom = a.copy(); a_bottom[2] = gap.rack_top_a_z
-            b_bottom = b.copy(); b_bottom[2] = gap.rack_top_b_z
-            # Top of vertical lines: above the arrow
-            a_top = a.copy(); a_top[2] += tick_up
-            b_top = b.copy(); b_top[2] += tick_up
+            # Tick lines: from anchor (bbox face) through edge, extended past bracket
+            a_extended = a + gap.tick_dir
+            b_extended = b + gap.tick_dir
 
             # Arrow direction vector (a→b)
             horiz = b - a
-            length = np.linalg.norm(horiz[:2])  # XY distance only
+            length = np.linalg.norm(horiz)
             if length < 1e-6:
                 continue
-            d = horiz.copy(); d[2] = 0; d /= np.linalg.norm(d)
+            d = horiz / length
             d_arrow = d * arrow_sz
 
+            # Barb perpendicular to both the arrow and the tick direction
+            barb = np.cross(d, gap.tick_dir)
+            barb_len = np.linalg.norm(barb)
+            if barb_len > 1e-6:
+                barb = barb / barb_len * (arrow_sz * 0.5)
+            else:
+                # Fallback: barb in Z if arrow and tick are coplanar
+                barb = np.array([0, 0, arrow_sz * 0.5])
+
             glBegin(GL_LINES)
-            # Left vertical line
-            glVertex3dv(a_top)
-            glVertex3dv(a_bottom)
-            # Right vertical line
-            glVertex3dv(b_top)
-            glVertex3dv(b_bottom)
-            # Horizontal arrow shaft
+            # Tick A: from anchor through edge to extended
+            glVertex3dv(a_extended)
+            glVertex3dv(gap.anchor_a)
+            # Tick B
+            glVertex3dv(b_extended)
+            glVertex3dv(gap.anchor_b)
+            # Arrow shaft
             glVertex3dv(a)
             glVertex3dv(b)
-            # Left arrowhead
-            glVertex3dv(a); glVertex3dv(a + d_arrow + barb_z)
-            glVertex3dv(a); glVertex3dv(a + d_arrow - barb_z)
-            # Right arrowhead
-            glVertex3dv(b); glVertex3dv(b - d_arrow + barb_z)
-            glVertex3dv(b); glVertex3dv(b - d_arrow - barb_z)
+            # Arrowhead A
+            glVertex3dv(a); glVertex3dv(a + d_arrow + barb)
+            glVertex3dv(a); glVertex3dv(a + d_arrow - barb)
+            # Arrowhead B
+            glVertex3dv(b); glVertex3dv(b - d_arrow + barb)
+            glVertex3dv(b); glVertex3dv(b - d_arrow - barb)
             glEnd()
 
         glEnable(GL_DEPTH_TEST)
@@ -519,13 +523,13 @@ class EditorViewport(BaseGLViewport):
             fm = painter.fontMetrics()
             tw = fm.horizontalAdvance(text)
 
-            bracket_px = abs(sb_x - sa_x)
+            bracket_px = max(abs(sb_x - sa_x), abs(sb_y - sa_y))
             if tw + 4 < bracket_px:
                 tx, ty = int(sx - tw / 2), int(sy - 8)
             else:
-                top_mid = mid.copy()
-                top_mid[2] = gap.edge_a[2] + 0.03
-                px, py = project_to_screen(top_mid, mv, proj, vp)
+                # Place text past the bracket (in tick_dir direction)
+                offset_mid = mid + gap.tick_dir * 1.5
+                px, py = project_to_screen(offset_mid, mv, proj, vp)
                 tx, ty = int(px - tw / 2), int(py - 4)
 
             # Draw white outline then red text for contrast
