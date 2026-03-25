@@ -27,7 +27,7 @@ from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
-from ..core.geometry import BBoxItem, PlaneItem
+from ..core.geometry import BBoxItem, GapItem, PlaneItem
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -122,6 +122,7 @@ class EditorWindow(QMainWindow):
         self._yaml_path: Optional[str] = annotations_path
         self.annotations: List[BBoxItem] = []
         self.planes: List[PlaneItem] = []
+        self.gap_items: List[GapItem] = []
         self._color_idx = 0
         self._plane_color_idx = 0
         self._undo_stack = []
@@ -350,6 +351,11 @@ class EditorWindow(QMainWindow):
         act_correction.setToolTip("Adjust scene rotation and shift for axis alignment")
         act_correction.triggered.connect(self._on_scene_correction)
         toolbar.addAction(act_correction)
+
+        act_pipeline = QAction("Load Pipeline Context", self)
+        act_pipeline.setToolTip("Load pipeline_context.yaml to display gap annotations between racks")
+        act_pipeline.triggered.connect(self._on_load_pipeline_context)
+        toolbar.addAction(act_pipeline)
 
         toolbar.addSeparator()
         exp_btn = QToolButton()
@@ -735,6 +741,83 @@ class EditorWindow(QMainWindow):
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
         self.setWindowTitle(f"Locul3D Editor — {folder_path.name}")
 
+    # ------------------------------------------------------------------
+    # Pipeline context (gap annotations)
+    # ------------------------------------------------------------------
+
+    def _on_load_pipeline_context(self):
+        """Open file dialog to load pipeline_context.yaml and display gap annotations."""
+        if not HAS_YAML:
+            self.status_label.setText("PyYAML not installed — cannot load pipeline context")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Pipeline Context", "",
+            "YAML files (*.yaml *.yml);;All files (*)")
+        if not path:
+            return
+
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+            gaps = self._parse_pipeline_gaps(data)
+            self.gap_items = gaps
+            self.gl_viewport.gaps = gaps
+            self.gl_viewport.update()
+            self.status_label.setText(f"Loaded {len(gaps)} gap annotations from pipeline context")
+        except Exception as exc:
+            self.status_label.setText(f"Failed to load pipeline context: {exc}")
+
+    def _parse_pipeline_gaps(self, data):
+        """Extract gap annotations from pipeline_context.yaml stage4+stage5 data."""
+        racks = data.get("stage4", {}).get("racks", [])
+        stage5 = data.get("stage5", {})
+        corridor_axis = stage5.get("corridor_axis", "X")
+        axis = 0 if corridor_axis == "X" else 1
+
+        gaps = []
+        for gap_info in stage5.get("gaps", []):
+            try:
+                a_idx = gap_info["rack_a_index"]
+                b_idx = gap_info["rack_b_index"]
+            except (KeyError, TypeError):
+                continue
+            if not (0 <= a_idx < len(racks) and 0 <= b_idx < len(racks)):
+                continue
+
+            try:
+                a = racks[a_idx]
+                b = racks[b_idx]
+                a_center = a["center"]
+                a_size = a["size"]
+                b_center = b["center"]
+                b_size = b["size"]
+
+                # Facing edges along corridor axis
+                a_right = a_center[axis] + a_size[axis] / 2
+                b_left = b_center[axis] - b_size[axis] / 2
+
+                # Cross-axis position (average of both racks)
+                cross = (a_center[1 - axis] + b_center[1 - axis]) / 2
+                # Z positions: each rack's top, and arrow level above both
+                a_top_z = a_center[2] + a_size[2] / 2
+                b_top_z = b_center[2] + b_size[2] / 2
+                arrow_z = max(a_top_z, b_top_z) + 0.05
+
+                if axis == 1:
+                    edge_a = [cross, a_right, arrow_z]
+                    edge_b = [cross, b_left, arrow_z]
+                else:
+                    edge_a = [a_right, cross, arrow_z]
+                    edge_b = [b_left, cross, arrow_z]
+
+                gaps.append(GapItem(edge_a, edge_b, gap_info["gap_mm"], axis, True,
+                                    rack_top_a_z=a_top_z, rack_top_b_z=b_top_z))
+            except (KeyError, IndexError, TypeError):
+                continue
+
+        return gaps
+
     def _on_clear_scene(self):
         """Remove all layers and annotations from the scene."""
         self.gl_viewport.delete_all_vbos()
@@ -744,6 +827,8 @@ class EditorWindow(QMainWindow):
         self.layer_manager.invalidate_scene_aabb()
         self.annotations.clear()
         self.planes.clear()
+        self.gap_items.clear()
+        self.gl_viewport.gaps = self.gap_items
         self._undo_stack.clear()
         self._yaml_path = None
         self._color_idx = 0
