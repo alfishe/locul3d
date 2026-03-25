@@ -95,6 +95,13 @@ class EditorViewport(BaseGLViewport):
                                    GL_COLOR_ARRAY, GL_NORMAL_ARRAY,
                                    GL_TEXTURE_COORD_ARRAY, glActiveTexture,
                                    GL_TEXTURE0, glBindTexture)
+            # Unbind QPainter's VAO — it captures vertex attribute state
+            # that breaks the fixed-function VBO pipeline.
+            try:
+                from OpenGL.GL import glBindVertexArray
+                glBindVertexArray(0)
+            except (ImportError, Exception):
+                pass
             glUseProgram(0)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)

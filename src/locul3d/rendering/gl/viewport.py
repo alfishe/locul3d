@@ -706,35 +706,38 @@ class BaseGLViewport(QOpenGLWidget):
         glDisableClientState(GL_COLOR_ARRAY)
 
     def _draw_wireframe_layer(self, layer):
-        """Render a wireframe layer (OBB edges) using VBOs."""
-        lines = layer.get_lines_array()
-        if lines is None:
+        """Render a wireframe layer (OBB edges) using immediate mode.
+
+        Wireframe overlays have very few vertices (typically <200),
+        so immediate mode avoids VBO state issues at no performance cost.
+        """
+        if layer.line_points is None or len(layer.line_points) == 0:
             return
 
         glDisable(GL_LIGHTING)
         glLineWidth(3.0)
 
-        # Wireframe overlays always use orange for visibility
-        glColor4f(1.0, 0.5, 0.0, layer.opacity)
-
-        vbo_lines = self._get_or_create_vbo(layer.id, "lines", lines)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_lines)
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glVertexPointer(3, GL_FLOAT, 0, None)
+        # Wireframes always use the layer's swatch color (uniform) so all
+        # edges in a single PLY overlay share one colour.
+        if layer.color is not None:
+            r, g, b = layer.color[:3]
+            glColor4f(r, g, b, layer.opacity)
+        else:
+            glColor4f(1.0, 0.5, 0.0, layer.opacity)
 
         needs_blend = layer.opacity < 0.99
         if needs_blend:
             glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
             glBlendColor(0.0, 0.0, 0.0, layer.opacity)
 
-        glDrawArrays(GL_LINES, 0, len(layer.line_points))
+        pts = layer.line_points
+        glBegin(GL_LINES)
+        for i in range(len(pts)):
+            glVertex3fv(pts[i])
+        glEnd()
 
         if needs_blend:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glDisableClientState(GL_COLOR_ARRAY)
 
         glEnable(GL_LIGHTING)
 
