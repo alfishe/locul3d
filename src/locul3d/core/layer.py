@@ -391,7 +391,7 @@ class LayerManager:
         ext = Path(path).suffix.lower()
         # Default type — load_geometry will upgrade to "mesh" or
         # "wireframe" if triangles/lines are found during parsing.
-        layer_type = "mesh" if ext == ".obj" else "pointcloud"
+        layer_type = "mesh" if ext in (".obj", ".stl") else "pointcloud"
 
         from .constants import AUTO_LAYER_COLORS
         color_idx = len(self.layers) % len(AUTO_LAYER_COLORS)

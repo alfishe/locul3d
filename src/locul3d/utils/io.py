@@ -195,7 +195,7 @@ def _load_with_open3d(path: str, layer: 'LayerData'):
 
     # For PLY/OBJ point clouds that reached the fallback, skip the mesh
     # probe (it reads the entire file just to discover no triangles).
-    is_ply_or_obj = path.lower().endswith(('.ply', '.obj'))
+    is_ply_or_obj = path.lower().endswith(('.ply', '.obj', '.stl'))
 
     # --- Try line set (wireframe) first ---
     try:

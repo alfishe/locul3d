@@ -52,7 +52,7 @@ class FolderLoadWorker(QThread):
 
             try:
                 ext = p.suffix.lower()
-                layer_type = "mesh" if ext == ".obj" else "pointcloud"
+                layer_type = "mesh" if ext in (".obj", ".stl") else "pointcloud"
                 color_idx = i % len(AUTO_LAYER_COLORS)
                 auto_color = AUTO_LAYER_COLORS[color_idx] + [1.0]
 
