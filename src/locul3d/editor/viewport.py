@@ -39,6 +39,7 @@ class EditorViewport(BaseGLViewport):
         self.annotations: List[BBoxItem] = []
         self.planes: List[PlaneItem] = []
         self.gaps: List[GapItem] = []
+        self.scene_bboxes: List[BBoxItem] = []  # pipeline bboxes in scene coords
         self.selected_idx: int = -1
 
         # Tool state
@@ -162,7 +163,8 @@ class EditorViewport(BaseGLViewport):
         if pre_corr is not None:
             glPopMatrix()
 
-        # Gap brackets live in scene (post-correction) coordinates
+        # Pipeline bboxes + gap brackets live in scene (post-correction) coordinates
+        self._draw_scene_bboxes()
         self._draw_gap_annotations()
 
         # Scene-coord planes: drawn inside correction (already active)
@@ -203,7 +205,7 @@ class EditorViewport(BaseGLViewport):
             glDepthMask(GL_FALSE)
 
             for i, bbox in enumerate(self.annotations):
-                if not bbox.visible or bbox.fill_opacity <= 0:
+                if not bbox.visible or bbox.fill_opacity <= 0 or getattr(bbox, 'scene_coords', False):
                     continue
                 r, g, b = bbox.color[:3]
                 alpha = bbox.fill_opacity
@@ -223,7 +225,7 @@ class EditorViewport(BaseGLViewport):
 
         # --- Pass 2: Wireframe edges ---
         for i, bbox in enumerate(self.annotations):
-            if not bbox.visible:
+            if not bbox.visible or getattr(bbox, 'scene_coords', False):
                 continue
 
             selected = (i == self.selected_idx)
@@ -232,7 +234,8 @@ class EditorViewport(BaseGLViewport):
             if selected:
                 glColor4f(1.0, 1.0, 0.0, 1.0)
             else:
-                glColor4f(1.0, 0.5, 0.0, 1.0)  # orange for all bboxes
+                r, g, b = bbox.color[:3]
+                glColor4f(r, g, b, 1.0)
 
             corners = bbox.corners()
             glBegin(GL_LINES)
@@ -419,8 +422,36 @@ class EditorViewport(BaseGLViewport):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
+    def _draw_scene_bboxes(self):
+        """Draw pipeline bboxes in scene (post-correction) coordinates."""
+        visible = [b for b in self.scene_bboxes if b.visible]
+        if not visible:
+            return
+        try:
+            from OpenGL.GL import (glDisable, glEnable, glLineWidth, glBegin, glEnd,
+                                   GL_DEPTH_TEST)
+        except ImportError:
+            return
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+
+        for bbox in visible:
+            glLineWidth(3.0)
+            r, g, b = bbox.color[:3]
+            glColor4f(r, g, b, 1.0)
+            corners = bbox.corners()
+            glBegin(GL_LINES)
+            for a, b_idx in AABB_EDGES:
+                glVertex3dv(corners[a])
+                glVertex3dv(corners[b_idx])
+            glEnd()
+
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
     def _draw_gap_annotations(self):
-        """Draw red bracket lines for gap annotations between racks."""
+        """Draw bracket lines for gap annotations."""
         visible_gaps = [g for g in self.gaps if g.visible]
         if not visible_gaps:
             return
@@ -434,11 +465,13 @@ class EditorViewport(BaseGLViewport):
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
         glLineWidth(3.0)
-        glColor4f(1.0, 0.2, 0.2, 1.0)
 
         arrow_sz = 0.02  # arrowhead size
+        default_color = (1.0, 0.2, 0.2)
 
         for gap in visible_gaps:
+            gc = gap.color or default_color
+            glColor4f(gc[0], gc[1], gc[2], 1.0)
             a = gap.edge_a  # bracket endpoint A
             b = gap.edge_b  # bracket endpoint B
 
@@ -511,9 +544,12 @@ class EditorViewport(BaseGLViewport):
 
         # White outline for readability over point cloud
         outline = QColor(255, 255, 255)
-        text_color = QColor(220, 30, 30)
+        default_color = (1.0, 0.2, 0.2)
 
         for gap in visible_gaps:
+            gc = gap.color or default_color
+            text_color = QColor(int(gc[0] * 255), int(gc[1] * 255), int(gc[2] * 255))
+
             sa_x, sa_y = project_to_screen(gap.edge_a, mv, proj, vp)
             sb_x, sb_y = project_to_screen(gap.edge_b, mv, proj, vp)
             mid = (gap.edge_a + gap.edge_b) / 2.0
