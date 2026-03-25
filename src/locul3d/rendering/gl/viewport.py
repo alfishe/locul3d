@@ -197,6 +197,20 @@ class BaseGLViewport(QOpenGLWidget):
         self.cam_elevation = 30.0
         self.update()
 
+    def reset(self):
+        """Reset all viewport state to initial values.
+
+        Subclasses should call ``super().reset()`` and then clear their
+        own state so a single ``reset()`` call propagates through the
+        entire hierarchy.
+        """
+        self.delete_all_vbos()
+        self.scene_correction = SceneCorrection()
+        self.scene_clip = None
+        self._correction_diag = None
+        if self._panorama and self._panorama.is_active:
+            self.exit_panorama()
+
     def set_view(self, azimuth: float, elevation: float):
         self.cam_azimuth = azimuth
         self.cam_elevation = elevation

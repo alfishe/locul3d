@@ -965,26 +965,32 @@ class EditorWindow(QMainWindow):
         return bboxes, gaps
 
     def _on_clear_scene(self):
-        """Remove all layers and annotations from the scene."""
-        self.gl_viewport.delete_all_vbos()
+        """Remove all layers, annotations, and overlays from the scene.
+
+        Delegates to ``gl_viewport.reset()`` which propagates through
+        the viewport hierarchy (BaseGLViewport → EditorViewport),
+        clearing VBOs, scene correction, annotations, gizmos, gaps,
+        pipeline bboxes, planes, and panorama state.
+        """
+        # Release layer CPU data
         for layer in self.layer_manager.layers:
             layer.release_source_data()
         self.layer_manager.layers.clear()
         self.layer_manager.invalidate_scene_aabb()
+
+        # Viewport reset — propagates through the full hierarchy
+        self.gl_viewport.reset()
+
+        # Window-level state
         self.annotations.clear()
-        self.planes.clear()
         self.gap_items.clear()
-        self.gl_viewport.gaps = self.gap_items
         self._undo_stack.clear()
         self._yaml_path = None
         self._color_idx = 0
         self._plane_color_idx = 0
-        self.gl_viewport.selected_idx = -1
-        self.gl_viewport.scene_correction = SceneCorrection()
-        self.gl_viewport.scene_clip = None
-        self.gl_viewport.set_correction_diagnostics(None)
         self._ref_point = None
-        self.gl_viewport.ref_point = None
+
+        # Rebuild UI panels
         self.bbox_panel.rebuild_list()
         self.plane_panel.rebuild_list()
         self.info_panel.clear()

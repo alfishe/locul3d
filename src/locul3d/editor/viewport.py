@@ -75,6 +75,32 @@ class EditorViewport(BaseGLViewport):
         self.scale_from_corner = False
 
     # ------------------------------------------------------------------
+    # State Reset
+    # ------------------------------------------------------------------
+
+    def reset(self):
+        """Reset all editor viewport state.
+
+        Propagates through the hierarchy: BaseGLViewport clears VBOs,
+        scene correction, clip planes, and panorama; this layer clears
+        annotations, planes, gaps, gizmos, and selection state.
+        """
+        super().reset()
+        self.annotations.clear()
+        self.planes.clear()
+        self.gaps.clear()
+        self.scene_bboxes.clear()
+        self.selected_idx = -1
+        self.ref_point = None
+        self._picking_ref_point = False
+        self._hovered_gizmo = None
+        self._drag_mode = None
+        self._drag_start = None
+        self._drag_orig_center = None
+        self._drag_orig_size = None
+        self._drag_orig_rot = 0.0
+
+    # ------------------------------------------------------------------
     # Rendering Overrides
     # ------------------------------------------------------------------
 
