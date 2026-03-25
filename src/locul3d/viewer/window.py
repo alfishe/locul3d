@@ -575,20 +575,18 @@ class ViewerWindow(QMainWindow):
 
     def _on_clear_scene(self):
         """Remove all layers from the scene."""
-        self.viewport.delete_all_vbos()
         for layer in self.layer_manager.layers:
             layer.release_source_data()
         self.layer_manager.layers.clear()
         self.layer_manager.invalidate_scene_aabb()
-        self.viewport.scene_correction = SceneCorrection()
-        self.viewport.scene_clip = None
+
+        # Viewport reset — clears VBOs, correction, clip, panorama
+        self.viewport.reset()
+
         self._selected_layer = None
         self.info_panel.clear()
 
-        if (hasattr(self.viewport, '_panorama')
-                and self.viewport._panorama
-                and self.viewport._panorama.is_active):
-            self.viewport.exit_panorama()
+        if hasattr(self, 'layer_panel'):
             self.layer_panel.highlight_active_pano(None)
 
         self.layer_panel.rebuild()
