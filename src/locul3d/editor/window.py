@@ -785,30 +785,81 @@ class EditorWindow(QMainWindow):
     _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
 
     def _parse_pipeline_context(self, data):
-        """Parse pipeline_context.yaml → (list[BBoxItem], list[GapItem])."""
-        racks = data.get("stage4", {}).get("racks", [])
-        stage5 = data.get("stage5", {})
-        corridor_axis = stage5.get("corridor_axis", "X")
+        """Parse pipeline_context.yaml → (list[BBoxItem], list[GapItem]).
+
+        Supports two rack data sources (tried in order):
+          1. stage3_rack.rack_regions — actual pipeline output (bbox min/max)
+          2. stage4.racks — refined objects (center/dimensions)
+
+        Gap annotations come from stage5 (rack_gaps / empty_spaces) when
+        present.  Corridor axis is inferred from stage3_rack, stage2, or
+        stage5 metadata.
+        """
+        # --- Determine corridor axis ---
+        corridor_axis = "X"
+        for src in (
+            data.get("stage3_rack", {}),
+            data.get("stage2", {}).get("corridors", {}),
+            data.get("stage2", {}).get("corridors_sr", {}),
+            data.get("stage5", {}),
+        ):
+            if isinstance(src, dict) and "corridor_axis" in src:
+                corridor_axis = src["corridor_axis"]
+                break
         axis = 0 if corridor_axis == "X" else 1
         cross_axis = 1 - axis
 
         bboxes = []
         gaps = []
+        racks_for_gaps = []  # unified center/dims list for gap computation
 
-        # --- Rack bboxes (orange) ---
-        for r in racks:
+        # --- Source 1: stage3_rack.rack_regions (min/max bbox format) ---
+        rack_regions = data.get("stage3_rack", {}).get("rack_regions", [])
+        for rr in rack_regions:
             try:
+                bb = rr["bbox"]
+                bb_min = bb["min"]
+                bb_max = bb["max"]
+                center = [
+                    (bb_min[0] + bb_max[0]) / 2,
+                    (bb_min[1] + bb_max[1]) / 2,
+                    (bb_min[2] + bb_max[2]) / 2,
+                ]
+                dims = [
+                    bb_max[0] - bb_min[0],
+                    bb_max[1] - bb_min[1],
+                    bb_max[2] - bb_min[2],
+                ]
                 bboxes.append(BBoxItem(
-                    label="rack", center=r["center"], size=r["size"],
+                    label="rack", center=center, size=dims,
                     color=self._RACK_COLOR))
+                racks_for_gaps.append({"center": center, "dims": dims})
             except (KeyError, TypeError):
                 continue
 
-        # --- Empty space bboxes (red) ---
+        # --- Source 2: stage4.racks (center/dimensions format) ---
+        if not racks_for_gaps:
+            for r in data.get("stage4", {}).get("racks", []):
+                try:
+                    dims = r.get("dimensions", r.get("size"))
+                    if dims is None:
+                        continue
+                    bboxes.append(BBoxItem(
+                        label="rack", center=r["center"], size=dims,
+                        color=self._RACK_COLOR))
+                    racks_for_gaps.append({"center": r["center"], "dims": dims})
+                except (KeyError, TypeError):
+                    continue
+
+        # --- Empty space bboxes (red) — from stage5 ---
+        stage5 = data.get("stage5", {})
         for es in stage5.get("empty_spaces", []):
             try:
+                dims = es.get("dimensions", es.get("size"))
+                if dims is None:
+                    continue
                 bboxes.append(BBoxItem(
-                    label="empty_space", center=es["center"], size=es["size"],
+                    label="empty_space", center=es["center"], size=dims,
                     color=self._EMPTY_SPACE_COLOR))
             except (KeyError, TypeError):
                 continue
@@ -820,14 +871,15 @@ class EditorWindow(QMainWindow):
                 b_idx = gap_info["rack_b_index"]
             except (KeyError, TypeError):
                 continue
-            if not (0 <= a_idx < len(racks) and 0 <= b_idx < len(racks)):
+            if not (0 <= a_idx < len(racks_for_gaps)
+                    and 0 <= b_idx < len(racks_for_gaps)):
                 continue
 
             try:
-                a = racks[a_idx]
-                b = racks[b_idx]
-                ac, asz = a["center"], a["size"]
-                bc, bsz = b["center"], b["size"]
+                a = racks_for_gaps[a_idx]
+                b = racks_for_gaps[b_idx]
+                ac, asz = a["center"], a["dims"]
+                bc, bsz = b["center"], b["dims"]
 
                 a_right = ac[axis] + asz[axis] / 2
                 b_left = bc[axis] - bsz[axis] / 2
@@ -856,7 +908,7 @@ class EditorWindow(QMainWindow):
 
         # --- Empty space gaps (bracket at front face) ---
         all_rack_rows = []
-        for rr in data.get("stage3_rack", {}).get("rack_regions", []):
+        for rr in rack_regions:
             try:
                 bbox = rr["bbox"]
                 rr_min = bbox["min"]
