@@ -168,6 +168,7 @@ class EditorWindow(QMainWindow):
         self.layer_panel.layer_selected.connect(self._on_layer_selected)
         self.layer_panel.opacity_adjusting.connect(self._on_opacity_adjusting)
         self.layer_panel.pano_requested.connect(self._on_pano_requested)
+        self.layer_panel.annotation_changed.connect(self.gl_viewport.update)
 
         self.gl_viewport.point_picked.connect(self._on_point_picked)
         self.gl_viewport.bbox_selected.connect(self._on_bbox_selected)
@@ -770,9 +771,25 @@ class EditorWindow(QMainWindow):
             self.gap_items = gaps
             self.gl_viewport.gaps = gaps
             self.bbox_panel.rebuild_list()
+
+            # Build annotation groups for layer panel toggles
+            rack_bboxes = [b for b in bboxes if b.label == "rack"]
+            es_bboxes = [b for b in bboxes if b.label == "empty_space"]
+            rack_gaps = [g for g in gaps if g.color == self._RACK_GAP_ANNOT]
+            es_gaps = [g for g in gaps if g.color == self._EMPTY_GAP_ANNOT]
+            groups = []
+            if rack_bboxes or rack_gaps:
+                groups.append({"name": "Racks", "color": self._RACK_COLOR,
+                               "items": rack_bboxes + rack_gaps})
+            if es_bboxes or es_gaps:
+                groups.append({"name": "Empty Spaces", "color": self._EMPTY_SPACE_COLOR,
+                               "items": es_bboxes + es_gaps})
+            self.layer_panel.annotation_groups = groups
+            self.layer_panel.rebuild()
+
             self.gl_viewport.update()
-            n_racks = sum(1 for b in bboxes if b.label == "rack")
-            n_es = sum(1 for b in bboxes if b.label == "empty_space")
+            n_racks = len(rack_bboxes)
+            n_es = len(es_bboxes)
             self.status_label.setText(
                 f"Pipeline: {n_racks} racks, {n_es} empty spaces, {len(gaps)} gap annotations")
         except Exception as exc:
@@ -923,6 +940,7 @@ class EditorWindow(QMainWindow):
         self.planes.clear()
         self.gap_items.clear()
         self.gl_viewport.gaps = self.gap_items
+        self.layer_panel.annotation_groups = []
         self._undo_stack.clear()
         self._yaml_path = None
         self._color_idx = 0
