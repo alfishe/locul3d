@@ -6,10 +6,15 @@ from typing import Optional
 
 
 class GapItem:
-    """A gap annotation between two adjacent rack edges."""
+    """A measurement annotation between two points with bracket + ticks.
+
+    Supports two orientations:
+      - "top":   bracket above racks, ticks extend down to rack tops (rack gaps)
+      - "front": bracket in front of rack row, ticks extend back to face (empty spaces)
+    """
 
     def __init__(self, edge_a=None, edge_b=None, gap_mm=0.0, axis=0, visible=True,
-                 rack_top_a_z=0.0, rack_top_b_z=0.0):
+                 anchor_a=None, anchor_b=None, tick_dir=None):
         self.edge_a = np.array(edge_a if edge_a is not None else [0, 0, 0],
                                dtype=np.float64)
         self.edge_b = np.array(edge_b if edge_b is not None else [0, 0, 0],
@@ -17,8 +22,14 @@ class GapItem:
         self.gap_mm = float(gap_mm)
         self.axis = int(axis)  # 0=X, 1=Y corridor axis
         self.visible = visible
-        self.rack_top_a_z = float(rack_top_a_z)  # top Z of rack A
-        self.rack_top_b_z = float(rack_top_b_z)  # top Z of rack B
+        # Where ticks connect to the bbox face
+        self.anchor_a = np.array(anchor_a if anchor_a is not None else self.edge_a,
+                                 dtype=np.float64)
+        self.anchor_b = np.array(anchor_b if anchor_b is not None else self.edge_b,
+                                 dtype=np.float64)
+        # Direction to extend ticks past the bracket (away from bbox)
+        self.tick_dir = np.array(tick_dir if tick_dir is not None else [0, 0, 0.03],
+                                 dtype=np.float64)
 
 
 class BBoxItem:
