@@ -568,15 +568,22 @@ class EditorWindow(QMainWindow):
             from ..ui.dialogs.folder_loading import (
                 FolderLoadWorker, FolderProgressDialog,
             )
+            existing_ids = {l.id for l in self.layer_manager.layers}
             file_names = [Path(p).name for p in geo_paths]
             folder = str(Path(geo_paths[0]).parent)
-            worker = FolderLoadWorker(geo_paths, self)
+            worker = FolderLoadWorker(geo_paths, self, existing_ids=existing_ids)
             dialog = FolderProgressDialog(folder, file_names, self)
             dialog.start(worker)
             dialog.exec()
 
             layers = dialog.get_result()
             if layers:
+                # Evict old layers/VBOs that are being replaced
+                for rid in worker.replaced_ids:
+                    self.gl_viewport.delete_vbos_for_layer(rid)
+                    self.layer_manager.layers[:] = [
+                        l for l in self.layer_manager.layers if l.id != rid
+                    ]
                 self.layer_manager.base_dir = str(Path(geo_paths[0]).parent)
                 for layer in layers:
                     self.layer_manager.layers.append(layer)
@@ -673,25 +680,8 @@ class EditorWindow(QMainWindow):
         from scratch (not appending to current layers).
         Camera is fitted once after all files load.
         """
-        # --- Full reset ---
-        self.gl_viewport.delete_all_vbos()
-        self.layer_manager.layers.clear()
-        self.layer_manager.invalidate_scene_aabb()
-        self.annotations.clear()
-        self.planes.clear()
-        self._undo_stack.clear()
-        self._yaml_path = None
-        self._color_idx = 0
-        self._plane_color_idx = 0
-        self.gl_viewport.selected_idx = -1
-        self.gl_viewport.scene_correction = SceneCorrection()
-        self.gl_viewport.scene_clip = None
-        self.gl_viewport.set_correction_diagnostics(None)
-        self._ref_point = None
-        self.gl_viewport.ref_point = None
-        self.bbox_panel.rebuild_list()
-        self.plane_panel.rebuild_list()
-        self.info_panel.clear()
+        # --- Full reset (propagates through viewport hierarchy) ---
+        self._on_clear_scene()
 
         # --- Load new folder ---
         folder_path = Path(folder)
