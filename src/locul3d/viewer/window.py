@@ -373,15 +373,22 @@ class ViewerWindow(QMainWindow):
             from ..ui.dialogs.folder_loading import (
                 FolderLoadWorker, FolderProgressDialog,
             )
+            existing_ids = {l.id for l in self.layer_manager.layers}
             file_names = [Path(p).name for p in geo_paths]
             folder = str(Path(geo_paths[0]).parent)
-            worker = FolderLoadWorker(geo_paths, self)
+            worker = FolderLoadWorker(geo_paths, self, existing_ids=existing_ids)
             dialog = FolderProgressDialog(folder, file_names, self)
             dialog.start(worker)
             dialog.exec()
 
             layers = dialog.get_result()
             if layers:
+                # Evict old layers/VBOs that are being replaced
+                for rid in worker.replaced_ids:
+                    self.viewport.delete_vbos_for_layer(rid)
+                    self.layer_manager.layers[:] = [
+                        l for l in self.layer_manager.layers if l.id != rid
+                    ]
                 self.layer_manager.base_dir = str(Path(geo_paths[0]).parent)
                 for layer in layers:
                     self.layer_manager.layers.append(layer)
