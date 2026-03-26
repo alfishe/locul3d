@@ -577,15 +577,22 @@ class EditorWindow(QMainWindow):
             from ..ui.dialogs.folder_loading import (
                 FolderLoadWorker, FolderProgressDialog,
             )
+            existing_ids = {l.id for l in self.layer_manager.layers}
             file_names = [Path(p).name for p in geo_paths]
             folder = str(Path(geo_paths[0]).parent)
-            worker = FolderLoadWorker(geo_paths, self)
+            worker = FolderLoadWorker(geo_paths, self, existing_ids=existing_ids)
             dialog = FolderProgressDialog(folder, file_names, self)
             dialog.start(worker)
             dialog.exec()
 
             layers = dialog.get_result()
             if layers:
+                # Evict old layers/VBOs that are being replaced
+                for rid in worker.replaced_ids:
+                    self.gl_viewport.delete_vbos_for_layer(rid)
+                    self.layer_manager.layers[:] = [
+                        l for l in self.layer_manager.layers if l.id != rid
+                    ]
                 self.layer_manager.base_dir = str(Path(geo_paths[0]).parent)
                 for layer in layers:
                     self.layer_manager.layers.append(layer)
@@ -1077,14 +1084,24 @@ class EditorWindow(QMainWindow):
         return bboxes, gaps
 
     def _on_clear_scene(self):
-        """Remove all layers and annotations from the scene."""
-        self.gl_viewport.delete_all_vbos()
+        """Remove all layers, annotations, and overlays from the scene.
+
+        Delegates to ``gl_viewport.reset()`` which propagates through
+        the viewport hierarchy (BaseGLViewport → EditorViewport),
+        clearing VBOs, scene correction, annotations, gizmos, gaps,
+        pipeline bboxes, planes, and panorama state.
+        """
+        # Release layer CPU data
         for layer in self.layer_manager.layers:
             layer.release_source_data()
         self.layer_manager.layers.clear()
         self.layer_manager.invalidate_scene_aabb()
+
+        # Viewport reset — propagates through the full hierarchy
+        self.gl_viewport.reset()
+
+        # Window-level state
         self.annotations.clear()
-        self.planes.clear()
         self.gap_items.clear()
         self.gl_viewport.gaps = self.gap_items
         self.gl_viewport.scene_bboxes = []
@@ -1093,12 +1110,9 @@ class EditorWindow(QMainWindow):
         self._yaml_path = None
         self._color_idx = 0
         self._plane_color_idx = 0
-        self.gl_viewport.selected_idx = -1
-        self.gl_viewport.scene_correction = SceneCorrection()
-        self.gl_viewport.scene_clip = None
-        self.gl_viewport.set_correction_diagnostics(None)
         self._ref_point = None
-        self.gl_viewport.ref_point = None
+
+        # Rebuild UI panels
         self.bbox_panel.rebuild_list()
         self.plane_panel.rebuild_list()
         self.info_panel.clear()

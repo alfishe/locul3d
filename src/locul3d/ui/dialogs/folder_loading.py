@@ -1,5 +1,6 @@
 """Folder loading dialog with per-file progress — mirrors E57ProgressDialog style."""
 
+import hashlib
 import time
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,13 @@ from ...core.layer import LayerData
 from ...utils.io import load_geometry
 
 
+def _layer_id_for_path(path_str: str) -> str:
+    """Deterministic layer ID from the absolute file path."""
+    resolved = str(Path(path_str).resolve())
+    h = hashlib.sha256(resolved.encode()).hexdigest()[:12]
+    return f"file_{h}"
+
+
 # ---------------------------------------------------------------------------
 # Background worker
 # ---------------------------------------------------------------------------
@@ -30,10 +38,12 @@ class FolderLoadWorker(QThread):
     finished_ok = Signal(list)             # list[LayerData]
     finished_err = Signal(str)
 
-    def __init__(self, file_paths: list, parent=None):
+    def __init__(self, file_paths: list, parent=None, existing_ids: set = None):
         super().__init__(parent)
         self._file_paths = file_paths
         self._cancelled = False
+        self._existing_ids = existing_ids or set()
+        self.replaced_ids: list = []  # IDs of layers being reloaded
 
     def cancel(self):
         self._cancelled = True
@@ -50,14 +60,19 @@ class FolderLoadWorker(QThread):
             name = p.name
             self.file_started.emit(name, i, total)
 
+            layer_id = _layer_id_for_path(path_str)
+            if layer_id in self._existing_ids:
+                self.replaced_ids.append(layer_id)
+                self.log_message.emit(f"  {name}  (reloading)")
+
             try:
                 ext = p.suffix.lower()
-                layer_type = "mesh" if ext == ".obj" else "pointcloud"
+                layer_type = "mesh" if ext in (".obj", ".stl") else "pointcloud"
                 color_idx = i % len(AUTO_LAYER_COLORS)
                 auto_color = AUTO_LAYER_COLORS[color_idx] + [1.0]
 
                 layer_def = {
-                    "id": f"file_{i}",
+                    "id": layer_id,
                     "name": name,
                     "type": layer_type,
                     "file": name,
