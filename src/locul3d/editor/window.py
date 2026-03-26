@@ -28,6 +28,7 @@ from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
 from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, PlaneItem
+from ..utils.metadata import RackMetadataHandler, EmptySpaceMetadataHandler
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -256,6 +257,19 @@ class EditorWindow(QMainWindow):
         act_open_folder.triggered.connect(self._on_open_folder)
         toolbar.addAction(act_open_folder)
 
+        load_btn = QToolButton()
+        load_btn.setText("Load")
+        load_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        load_menu = QMenu(self)
+        act_pipeline = load_menu.addAction("Load Pipeline Context")
+        act_pipeline.setToolTip("Load pipeline_context.yaml to display gap annotations")
+        act_pipeline.triggered.connect(self._on_load_pipeline_context)
+        act_metadata = load_menu.addAction("Load Metadata")
+        act_metadata.setToolTip("Load *_metadata.yaml files from a folder")
+        act_metadata.triggered.connect(self._on_load_metadata)
+        load_btn.setMenu(load_menu)
+        toolbar.addWidget(load_btn)
+
         act_clear = QAction("Clear Scene", self)
         act_clear.setToolTip("Remove all layers and annotations from the scene")
         act_clear.triggered.connect(self._on_clear_scene)
@@ -351,11 +365,6 @@ class EditorWindow(QMainWindow):
         act_correction.setToolTip("Adjust scene rotation and shift for axis alignment")
         act_correction.triggered.connect(self._on_scene_correction)
         toolbar.addAction(act_correction)
-
-        act_pipeline = QAction("Load Pipeline Context", self)
-        act_pipeline.setToolTip("Load pipeline_context.yaml to display gap annotations between racks")
-        act_pipeline.triggered.connect(self._on_load_pipeline_context)
-        toolbar.addAction(act_pipeline)
 
         toolbar.addSeparator()
         exp_btn = QToolButton()
@@ -679,6 +688,10 @@ class EditorWindow(QMainWindow):
         self.layer_manager.invalidate_scene_aabb()
         self.annotations.clear()
         self.planes.clear()
+        self.gap_items.clear()
+        self.gl_viewport.gaps = self.gap_items
+        self.gl_viewport.scene_bboxes = []
+        self.layer_panel.annotation_groups = []
         self._undo_stack.clear()
         self._yaml_path = None
         self._color_idx = 0
@@ -736,10 +749,84 @@ class EditorWindow(QMainWindow):
                 self.layer_panel.rebuild()
             except Exception:
                 pass
+        # Auto-detect metadata files
+        self._detect_metadata(folder_path)
+
         self.gl_viewport.fit_to_scene()
         self._post_load()
         self.status_label.setText(f"Loaded folder: {folder_path.name}")
         self.setWindowTitle(f"Locul3D Editor — {folder_path.name}")
+
+    def _on_load_metadata(self):
+        """Prompt for a folder and load all *_metadata.yaml files from it."""
+        folder = QFileDialog.getExistingDirectory(self, "Load Metadata")
+        if not folder:
+            return
+        folder_path = Path(folder)
+        self._detect_metadata(folder_path, append=True)
+        n_groups = len(self.layer_panel.annotation_groups)
+        if n_groups:
+            n_items = sum(len(g["items"]) for g in self.layer_panel.annotation_groups)
+            self.status_label.setText(
+                f"Loaded metadata: {n_groups} group(s), {n_items} items from {folder_path.name}")
+        else:
+            self.status_label.setText(f"No metadata files found in {folder_path.name}")
+
+    def _detect_metadata(self, folder_path: Path, append: bool = False):
+        """Auto-detect and load metadata files from a folder.
+
+        Args:
+            append: If True, add to existing annotations. If False, replace them.
+        """
+        new_bboxes = []
+        new_gaps = []
+        new_groups = []
+
+        for handler in self._metadata_handlers:
+            if not handler.detect(folder_path):
+                continue
+            try:
+                bboxes, gaps = handler.parse(folder_path)
+            except Exception:
+                continue
+            if not bboxes and not gaps:
+                continue
+
+            for bbox in bboxes:
+                bbox.scene_coords = True
+            new_bboxes.extend(bboxes)
+            new_gaps.extend(gaps)
+
+            items = list(bboxes) + list(gaps)
+            new_groups.append({
+                "name": handler.display_name,
+                "color": items[0].color,
+                "items": items,
+            })
+
+        if not new_bboxes and not new_gaps:
+            return
+
+        if append:
+            # Add to existing pipeline annotations
+            self.annotations.extend(new_bboxes)
+            self.gl_viewport.scene_bboxes.extend(new_bboxes)
+            self.gap_items.extend(new_gaps)
+            self.gl_viewport.gaps = self.gap_items
+            self.layer_panel.annotation_groups.extend(new_groups)
+        else:
+            # Replace previous pipeline annotations
+            self.annotations = [a for a in self.annotations
+                                if not getattr(a, 'scene_coords', False)]
+            self.annotations.extend(new_bboxes)
+            self.gl_viewport.scene_bboxes = new_bboxes
+            self.gap_items = new_gaps
+            self.gl_viewport.gaps = new_gaps
+            self.layer_panel.annotation_groups = new_groups
+
+        self.bbox_panel.rebuild_list()
+        self.layer_panel.rebuild()
+        self.gl_viewport.update()
 
     # ------------------------------------------------------------------
     # Pipeline context (gap annotations)
@@ -804,6 +891,8 @@ class EditorWindow(QMainWindow):
     _EMPTY_SPACE_COLOR = (1.0, 0.2, 0.2) # red
     _RACK_GAP_ANNOT = (0.0, 0.85, 0.85)  # cyan — contrasts orange
     _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
+
+    _metadata_handlers = [RackMetadataHandler(), EmptySpaceMetadataHandler()]
 
     def _parse_pipeline_context(self, data):
         """Parse pipeline_context.yaml → (list[BBoxItem], list[GapItem])."""

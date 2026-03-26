@@ -261,6 +261,10 @@ class AnnotationRowWidget(QFrame):
         )
         layout.addWidget(label, stretch=1)
 
+    def set_visible(self, visible: bool):
+        """Programmatically set visibility (e.g. from Show/Hide All)."""
+        self.checkbox.setChecked(visible)
+
     def _on_visibility(self, checked: bool):
         for item in self.group["items"]:
             item.visible = checked
@@ -279,6 +283,7 @@ class LayerPanel(QWidget):
         super().__init__(parent)
         self.layer_manager = layer_manager
         self._row_widgets: list = []
+        self._annotation_rows: list = []
         self.annotation_groups: list = []
         self._build_ui()
 
@@ -317,6 +322,7 @@ class LayerPanel(QWidget):
     def rebuild(self):
         """Rebuild layer list from layer manager."""
         self._row_widgets.clear()
+        self._annotation_rows.clear()
         while self._scroll_layout.count():
             item = self._scroll_layout.takeAt(0)
             w = item.widget()
@@ -359,6 +365,7 @@ class LayerPanel(QWidget):
                 row = AnnotationRowWidget(group)
                 row.visibility_changed.connect(self._on_layer_changed)
                 self._scroll_layout.addWidget(row)
+                self._annotation_rows.append(row)
 
         self._scroll_layout.addStretch()
 
@@ -404,6 +411,8 @@ class LayerPanel(QWidget):
             layer.visible = True
         for row in self._row_widgets:
             row.sync_from_layer()
+        for row in self._annotation_rows:
+            row.set_visible(True)
         self.layer_changed.emit()
 
     def _on_hide_all(self):
@@ -411,6 +420,8 @@ class LayerPanel(QWidget):
             layer.visible = False
         for row in self._row_widgets:
             row.sync_from_layer()
+        for row in self._annotation_rows:
+            row.set_visible(False)
         self.layer_changed.emit()
 
     def sync_all(self):
