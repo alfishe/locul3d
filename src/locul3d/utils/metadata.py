@@ -28,6 +28,11 @@ class MetadataHandler(ABC):
         """Return True if this handler's metadata files exist in directory."""
         return any(directory.glob(self.file_pattern))
 
+    # Cross-axis offset from rack inner face (meters)
+    _WIDTH_OFFSET = 0.10      # tier 1: width brackets
+    _WALL_DIST_OFFSET = 0.22  # tier 2: wall distance brackets
+    wall_dist_color: tuple = (1.0, 0.2, 0.2)  # red
+
     def parse(
         self, directory: Path
     ) -> Tuple[List[BBoxItem], List[GapItem]]:
@@ -69,21 +74,20 @@ class MetadataHandler(ABC):
                 if key not in pairs:
                     pairs[key] = nb["gap_mm"]
 
-        if not pairs:
-            return bboxes, []
-
-        # Detect corridor axis from neighbor pairs
-        axis = _detect_corridor_axis(items, pairs)
+        # Detect corridor axis
+        if pairs:
+            axis = _detect_corridor_axis(items, pairs)
+        else:
+            axis = _detect_corridor_axis_from_spread(items)
         cross_axis = 1 - axis
 
-        # Build GapItems
+        # Build neighbor gap annotations (above rack tops)
         gaps = []
         for (a_idx, b_idx), gap_mm in pairs.items():
             ra, rb = items[a_idx], items[b_idx]
             ac, asz = ra["center"], ra["size"]
             bc, bsz = rb["center"], rb["size"]
 
-            # Sort so a is the one with smaller corridor-axis position
             if ac[axis] > bc[axis]:
                 ac, asz, bc, bsz = bc, bsz, ac, asz
 
@@ -113,6 +117,143 @@ class MetadataHandler(ABC):
                 category=self.category,
             ))
 
+        # Build width annotations at Z=0, offset into corridor
+        # Cluster racks by cross-axis position to detect row sides
+        cross_positions = sorted(
+            [(r["center"][cross_axis], idx) for idx, r in items.items()])
+        rows = _cluster_cross_rows(cross_positions)
+
+        # For each row, determine inward direction (toward nearest other row)
+        row_means = [sum(x for x, _ in row) / len(row) for row in rows]
+        row_directions = {}  # idx → cross_sign
+        for ri, row in enumerate(rows):
+            mean = row_means[ri]
+            others = [m for i, m in enumerate(row_means) if i != ri]
+            if others:
+                nearest = min(others, key=lambda m: abs(m - mean))
+                sign = 1 if mean < nearest else -1
+            else:
+                sign = 1  # single row, default right
+            for _, idx in row:
+                row_directions[idx] = sign
+
+        for idx in sorted(items):
+            r = items[idx]
+            length_mm = r.get("length_mm")
+            if length_mm is None:
+                continue
+
+            c = r["center"]
+            sz = r["size"]
+            rack_left = c[axis] - sz[axis] / 2
+            rack_right = c[axis] + sz[axis] / 2
+            rack_cross = c[cross_axis]
+
+            cross_sign = row_directions.get(idx, 1)
+            bracket_cross = rack_cross + cross_sign * (
+                sz[cross_axis] / 2 + self._WIDTH_OFFSET)
+
+            # Anchor at the rack's inner face
+            rack_inner = rack_cross + cross_sign * sz[cross_axis] / 2
+
+            if axis == 1:
+                edge_a = [bracket_cross, rack_left, 0.0]
+                edge_b = [bracket_cross, rack_right, 0.0]
+                anchor_a = [rack_inner, rack_left, 0.0]
+                anchor_b = [rack_inner, rack_right, 0.0]
+                tick_dir = [cross_sign * 0.03, 0, 0]
+            else:
+                edge_a = [rack_left, bracket_cross, 0.0]
+                edge_b = [rack_right, bracket_cross, 0.0]
+                anchor_a = [rack_left, rack_inner, 0.0]
+                anchor_b = [rack_right, rack_inner, 0.0]
+                tick_dir = [0, cross_sign * 0.03, 0]
+
+            gaps.append(GapItem(
+                edge_a, edge_b, length_mm, axis, True,
+                anchor_a=anchor_a, anchor_b=anchor_b,
+                tick_dir=tick_dir,
+                color=self.gap_color,
+                category=self.category,
+            ))
+
+        # Build wall distance annotations at Z=0, staggered per row
+        # Group racks by row for shared spine
+        row_items = {}  # row_index → [(idx, data)]
+        for ri, row in enumerate(rows):
+            for _, idx in row:
+                row_items.setdefault(ri, []).append((idx, items[idx]))
+
+        for ri, rack_list in row_items.items():
+            # Filter to racks that have wall distance data
+            with_wall = [(idx, r) for idx, r in rack_list
+                         if r.get("distance_to_high_wall_mm") is not None
+                         and r.get("wall_high") is not None]
+            if not with_wall:
+                continue
+
+            # Sort by distance (closest to wall → smallest offset)
+            with_wall.sort(key=lambda x: x[1]["distance_to_high_wall_mm"])
+
+            wall_high = with_wall[0][1]["wall_high"]
+            cross_sign = row_directions.get(with_wall[0][0], 1)
+            # Row's mean inner face for consistent spine position
+            row_cross = sum(r["center"][cross_axis] for _, r in with_wall) / len(with_wall)
+            mean_half = sum(r["size"][cross_axis] / 2 for _, r in with_wall) / len(with_wall)
+            row_inner = row_cross + cross_sign * mean_half
+
+            for step_i, (idx, r) in enumerate(with_wall):
+                wall_dist = r["distance_to_high_wall_mm"]
+                c = r["center"]
+                sz = r["size"]
+                rack_far = c[axis] + sz[axis] / 2
+                rack_inner = c[cross_axis] + cross_sign * sz[cross_axis] / 2
+
+                # Stagger: each rack at increasing offset from inner face
+                bracket_cross = row_inner + cross_sign * (
+                    self._WALL_DIST_OFFSET + step_i * 0.08)
+
+                if axis == 1:
+                    edge_a = [bracket_cross, rack_far, 0.0]
+                    edge_b = [bracket_cross, wall_high, 0.0]
+                    anchor_a = [rack_inner, rack_far, 0.0]
+                    anchor_b = [bracket_cross, wall_high, 0.0]
+                    tick_dir = [cross_sign * 0.03, 0, 0]
+                else:
+                    edge_a = [rack_far, bracket_cross, 0.0]
+                    edge_b = [wall_high, bracket_cross, 0.0]
+                    anchor_a = [rack_far, rack_inner, 0.0]
+                    anchor_b = [wall_high, bracket_cross, 0.0]
+                    tick_dir = [0, cross_sign * 0.03, 0]
+
+                gaps.append(GapItem(
+                    edge_a, edge_b, wall_dist, axis, True,
+                    anchor_a=anchor_a, anchor_b=anchor_b,
+                    tick_dir=tick_dir,
+                    color=self.wall_dist_color,
+                    category=self.category,
+                    label_t=0.05,
+                ))
+
+            # Spine at wall_high connecting all bracket tips
+            n = len(with_wall)
+            inner_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
+            outer_cross = row_inner + cross_sign * (
+                self._WALL_DIST_OFFSET + (n - 1) * 0.08)
+            if axis == 1:
+                spine_a = [inner_cross, wall_high, 0.0]
+                spine_b = [outer_cross, wall_high, 0.0]
+            else:
+                spine_a = [wall_high, inner_cross, 0.0]
+                spine_b = [wall_high, outer_cross, 0.0]
+            gaps.append(GapItem(
+                spine_a, spine_b, -1, cross_axis, True,
+                anchor_a=spine_a, anchor_b=spine_b,
+                tick_dir=[0, 0, 0],
+                color=self.wall_dist_color,
+                category=self.category,
+            ))
+
         return bboxes, gaps
 
 
@@ -126,6 +267,27 @@ def _detect_corridor_axis(items, pairs):
         x_total += abs(ac[0] - bc[0])
         y_total += abs(ac[1] - bc[1])
     return 1 if y_total >= x_total else 0
+
+
+def _cluster_cross_rows(sorted_positions, gap_threshold=0.8):
+    """Group sorted (cross_val, idx) pairs into rows by cross-axis gaps."""
+    if not sorted_positions:
+        return []
+    rows = [[sorted_positions[0]]]
+    for i in range(1, len(sorted_positions)):
+        if sorted_positions[i][0] - sorted_positions[i - 1][0] > gap_threshold:
+            rows.append([])
+        rows[-1].append(sorted_positions[i])
+    return rows
+
+
+def _detect_corridor_axis_from_spread(items):
+    """Fallback: determine corridor axis from coordinate spread."""
+    xs = [r["center"][0] for r in items.values()]
+    ys = [r["center"][1] for r in items.values()]
+    dx = max(xs) - min(xs) if xs else 0
+    dy = max(ys) - min(ys) if ys else 0
+    return 1 if dy >= dx else 0
 
 
 class RackMetadataHandler(MetadataHandler):
@@ -145,6 +307,6 @@ class EmptySpaceMetadataHandler(MetadataHandler):
     file_pattern = "empty_*_metadata.yaml"
     category = AnnotationCategory.EMPTY_SPACE
     display_name = "Empty Spaces"
-    bbox_color = (1.0, 0.2, 0.2)       # red
+    bbox_color = (0.2, 0.4, 1.0)       # blue
     gap_color = (0.2, 0.9, 0.2)        # green
     neighbor_index_key = "empty_index"
