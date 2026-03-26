@@ -206,6 +206,71 @@ class LayerRowWidget(QFrame):
         super().mousePressEvent(event)
 
 
+class AnnotationRowWidget(QFrame):
+    """Simplified row for toggling visibility of an annotation group."""
+
+    visibility_changed = Signal()
+
+    def __init__(self, group: dict, parent=None):
+        super().__init__(parent)
+        self.group = group  # {"name": str, "color": [r,g,b], "items": list}
+
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(4)
+
+        # Visibility checkbox
+        self.checkbox = QCheckBox()
+        self.checkbox.setChecked(True)
+        self.checkbox.setToolTip("Show/Hide")
+        self.checkbox.setStyleSheet(f"""
+            QCheckBox::indicator {{
+                width: 14px; height: 14px;
+                border: 2px solid {COLORS['border']};
+                border-radius: 3px;
+            }}
+            QCheckBox::indicator:checked {{
+                background: {COLORS['accent']};
+                border-color: {COLORS['accent']};
+            }}
+            QCheckBox::indicator:unchecked {{
+                background: {COLORS['input_bg']};
+            }}
+        """)
+        self.checkbox.toggled.connect(self._on_visibility)
+        layout.addWidget(self.checkbox)
+
+        # Color swatch (display-only)
+        swatch = QLabel()
+        swatch.setFixedSize(16, 12)
+        r, g, b = [int(c * 255) for c in group["color"][:3]]
+        swatch.setStyleSheet(
+            f"background: rgb({r},{g},{b}); border: 1px solid {COLORS['swatch_border']};"
+            f" border-radius: 3px;"
+        )
+        layout.addWidget(swatch)
+
+        # Name with count
+        count = len(group["items"])
+        label = QLabel(f"{group['name']} ({count})")
+        label.setMinimumWidth(60)
+        label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        layout.addWidget(label, stretch=1)
+
+    def set_visible(self, visible: bool):
+        """Programmatically set visibility (e.g. from Show/Hide All)."""
+        self.checkbox.setChecked(visible)
+
+    def _on_visibility(self, checked: bool):
+        for item in self.group["items"]:
+            item.visible = checked
+        self.visibility_changed.emit()
+
+
 class LayerPanel(QWidget):
     """Sidebar widget with grouped layer controls."""
 
@@ -218,6 +283,8 @@ class LayerPanel(QWidget):
         super().__init__(parent)
         self.layer_manager = layer_manager
         self._row_widgets: list = []
+        self._annotation_rows: list = []
+        self.annotation_groups: list = []
         self._build_ui()
 
     def _build_ui(self):
@@ -255,6 +322,7 @@ class LayerPanel(QWidget):
     def rebuild(self):
         """Rebuild layer list from layer manager."""
         self._row_widgets.clear()
+        self._annotation_rows.clear()
         while self._scroll_layout.count():
             item = self._scroll_layout.takeAt(0)
             w = item.widget()
@@ -284,6 +352,20 @@ class LayerPanel(QWidget):
                 row.layer_selected.connect(self._on_layer_selected)
                 self._scroll_layout.addWidget(row)
                 self._row_widgets.append(row)
+
+        # --- Annotations section ---
+        if self.annotation_groups:
+            ann_header = QLabel("  Annotations")
+            ann_header.setStyleSheet(
+                f"color: {COLORS['text']}; font-size: 11px; font-weight: bold; "
+                f"padding: 6px 0 3px 0; border-bottom: 1px solid {COLORS['border']};"
+            )
+            self._scroll_layout.addWidget(ann_header)
+            for group in self.annotation_groups:
+                row = AnnotationRowWidget(group)
+                row.visibility_changed.connect(self._on_layer_changed)
+                self._scroll_layout.addWidget(row)
+                self._annotation_rows.append(row)
 
         self._scroll_layout.addStretch()
 
@@ -329,6 +411,8 @@ class LayerPanel(QWidget):
             layer.visible = True
         for row in self._row_widgets:
             row.sync_from_layer()
+        for row in self._annotation_rows:
+            row.set_visible(True)
         self.layer_changed.emit()
 
     def _on_hide_all(self):
@@ -336,6 +420,8 @@ class LayerPanel(QWidget):
             layer.visible = False
         for row in self._row_widgets:
             row.sync_from_layer()
+        for row in self._annotation_rows:
+            row.set_visible(False)
         self.layer_changed.emit()
 
     def sync_all(self):

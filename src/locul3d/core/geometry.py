@@ -1,8 +1,15 @@
 """Geometry data models for annotations."""
 
+import enum
 import math
 import numpy as np
 from typing import Optional
+
+
+class AnnotationCategory(enum.Enum):
+    """Pipeline annotation category for grouping bboxes and gaps."""
+    RACK = "rack"
+    EMPTY_SPACE = "empty_space"
 
 
 class GapItem:
@@ -14,7 +21,8 @@ class GapItem:
     """
 
     def __init__(self, edge_a=None, edge_b=None, gap_mm=0.0, axis=0, visible=True,
-                 anchor_a=None, anchor_b=None, tick_dir=None, color=None):
+                 anchor_a=None, anchor_b=None, tick_dir=None, color=None,
+                 category: Optional[AnnotationCategory] = None):
         self.edge_a = np.array(edge_a if edge_a is not None else [0, 0, 0],
                                dtype=np.float64)
         self.edge_b = np.array(edge_b if edge_b is not None else [0, 0, 0],
@@ -32,6 +40,7 @@ class GapItem:
                                  dtype=np.float64)
         # Annotation color (RGB 0-1); None = use default
         self.color = tuple(color) if color is not None else None
+        self.category = category
 
 
 class BBoxItem:
