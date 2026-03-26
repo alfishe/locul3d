@@ -28,8 +28,10 @@ class MetadataHandler(ABC):
         """Return True if this handler's metadata files exist in directory."""
         return any(directory.glob(self.file_pattern))
 
-    # Cross-axis offset from rack face for width annotations (meters)
-    _WIDTH_OFFSET = 0.10
+    # Cross-axis offset from rack inner face (meters)
+    _WIDTH_OFFSET = 0.10      # tier 1: width brackets
+    _WALL_DIST_OFFSET = 0.22  # tier 2: wall distance brackets
+    wall_dist_color: tuple = (1.0, 0.2, 0.2)  # red
 
     def parse(
         self, directory: Path
@@ -172,6 +174,83 @@ class MetadataHandler(ABC):
                 anchor_a=anchor_a, anchor_b=anchor_b,
                 tick_dir=tick_dir,
                 color=self.gap_color,
+                category=self.category,
+            ))
+
+        # Build wall distance annotations at Z=0, staggered per row
+        # Group racks by row for shared spine
+        row_items = {}  # row_index → [(idx, data)]
+        for ri, row in enumerate(rows):
+            for _, idx in row:
+                row_items.setdefault(ri, []).append((idx, items[idx]))
+
+        for ri, rack_list in row_items.items():
+            # Filter to racks that have wall distance data
+            with_wall = [(idx, r) for idx, r in rack_list
+                         if r.get("distance_to_high_wall_mm") is not None
+                         and r.get("wall_high") is not None]
+            if not with_wall:
+                continue
+
+            # Sort by distance (closest to wall → smallest offset)
+            with_wall.sort(key=lambda x: x[1]["distance_to_high_wall_mm"])
+
+            wall_high = with_wall[0][1]["wall_high"]
+            cross_sign = row_directions.get(with_wall[0][0], 1)
+            # Row's mean inner face for consistent spine position
+            row_cross = sum(r["center"][cross_axis] for _, r in with_wall) / len(with_wall)
+            mean_half = sum(r["size"][cross_axis] / 2 for _, r in with_wall) / len(with_wall)
+            row_inner = row_cross + cross_sign * mean_half
+
+            for step_i, (idx, r) in enumerate(with_wall):
+                wall_dist = r["distance_to_high_wall_mm"]
+                c = r["center"]
+                sz = r["size"]
+                rack_far = c[axis] + sz[axis] / 2
+                rack_inner = c[cross_axis] + cross_sign * sz[cross_axis] / 2
+
+                # Stagger: each rack at increasing offset from inner face
+                bracket_cross = row_inner + cross_sign * (
+                    self._WALL_DIST_OFFSET + step_i * 0.08)
+
+                if axis == 1:
+                    edge_a = [bracket_cross, rack_far, 0.0]
+                    edge_b = [bracket_cross, wall_high, 0.0]
+                    anchor_a = [rack_inner, rack_far, 0.0]
+                    anchor_b = [bracket_cross, wall_high, 0.0]
+                    tick_dir = [cross_sign * 0.03, 0, 0]
+                else:
+                    edge_a = [rack_far, bracket_cross, 0.0]
+                    edge_b = [wall_high, bracket_cross, 0.0]
+                    anchor_a = [rack_far, rack_inner, 0.0]
+                    anchor_b = [wall_high, bracket_cross, 0.0]
+                    tick_dir = [0, cross_sign * 0.03, 0]
+
+                gaps.append(GapItem(
+                    edge_a, edge_b, wall_dist, axis, True,
+                    anchor_a=anchor_a, anchor_b=anchor_b,
+                    tick_dir=tick_dir,
+                    color=self.wall_dist_color,
+                    category=self.category,
+                    label_t=0.05,
+                ))
+
+            # Spine at wall_high connecting all bracket tips
+            n = len(with_wall)
+            inner_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
+            outer_cross = row_inner + cross_sign * (
+                self._WALL_DIST_OFFSET + (n - 1) * 0.08)
+            if axis == 1:
+                spine_a = [inner_cross, wall_high, 0.0]
+                spine_b = [outer_cross, wall_high, 0.0]
+            else:
+                spine_a = [wall_high, inner_cross, 0.0]
+                spine_b = [wall_high, outer_cross, 0.0]
+            gaps.append(GapItem(
+                spine_a, spine_b, -1, cross_axis, True,
+                anchor_a=spine_a, anchor_b=spine_b,
+                tick_dir=[0, 0, 0],
+                color=self.wall_dist_color,
                 category=self.category,
             ))
 
