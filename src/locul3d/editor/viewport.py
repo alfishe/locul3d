@@ -581,15 +581,20 @@ class EditorViewport(BaseGLViewport):
             mid = (gap.edge_a + gap.edge_b) / 2.0
             sx, sy = project_to_screen(mid, mv, proj, vp)
 
+            if gap.gap_mm < 0:
+                continue  # spine connector — no label
             text = f"{gap.gap_mm:.0f}mm"
             fm = painter.fontMetrics()
             tw = fm.horizontalAdvance(text)
 
             bracket_px = max(abs(sb_x - sa_x), abs(sb_y - sa_y))
             if tw + 4 < bracket_px:
-                tx, ty = int(sx - tw / 2), int(sy - 8)
+                t = gap.label_t
+                label_pos = gap.edge_a * (1 - t) + gap.edge_b * t
+                lx, ly = project_to_screen(label_pos, mv, proj, vp)
+                tx, ty = int(lx - tw / 2), int(ly - 8)
             else:
-                # Place text past the bracket (in tick_dir direction)
+                # Short bracket — place text past the bracket
                 offset_mid = mid + gap.tick_dir * 1.5
                 px, py = project_to_screen(offset_mid, mv, proj, vp)
                 tx, ty = int(px - tw / 2), int(py - 4)

@@ -22,7 +22,8 @@ class GapItem:
 
     def __init__(self, edge_a=None, edge_b=None, gap_mm=0.0, axis=0, visible=True,
                  anchor_a=None, anchor_b=None, tick_dir=None, color=None,
-                 category: Optional[AnnotationCategory] = None):
+                 category: Optional[AnnotationCategory] = None,
+                 label_t: float = 0.5):
         self.edge_a = np.array(edge_a if edge_a is not None else [0, 0, 0],
                                dtype=np.float64)
         self.edge_b = np.array(edge_b if edge_b is not None else [0, 0, 0],
@@ -41,6 +42,7 @@ class GapItem:
         # Annotation color (RGB 0-1); None = use default
         self.color = tuple(color) if color is not None else None
         self.category = category
+        self.label_t = label_t  # 0.0=edge_a, 0.5=midpoint, 1.0=edge_b
 
 
 class BBoxItem:
