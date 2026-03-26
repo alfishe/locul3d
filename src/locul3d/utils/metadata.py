@@ -228,6 +228,6 @@ class EmptySpaceMetadataHandler(MetadataHandler):
     file_pattern = "empty_*_metadata.yaml"
     category = AnnotationCategory.EMPTY_SPACE
     display_name = "Empty Spaces"
-    bbox_color = (1.0, 0.2, 0.2)       # red
+    bbox_color = (0.2, 0.4, 1.0)       # blue
     gap_color = (0.2, 0.9, 0.2)        # green
     neighbor_index_key = "empty_index"

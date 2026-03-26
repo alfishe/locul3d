@@ -888,7 +888,7 @@ class EditorWindow(QMainWindow):
 
     # Bbox + gap annotation colors (known, so text contrast is deterministic)
     _RACK_COLOR = (1.0, 0.5, 0.0)       # orange
-    _EMPTY_SPACE_COLOR = (1.0, 0.2, 0.2) # red
+    _EMPTY_SPACE_COLOR = (0.2, 0.4, 1.0) # blue
     _RACK_GAP_ANNOT = (0.0, 0.85, 0.85)  # cyan — contrasts orange
     _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
 
