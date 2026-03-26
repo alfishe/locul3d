@@ -28,6 +28,9 @@ class MetadataHandler(ABC):
         """Return True if this handler's metadata files exist in directory."""
         return any(directory.glob(self.file_pattern))
 
+    # Cross-axis offset from rack face for width annotations (meters)
+    _WIDTH_OFFSET = 0.10
+
     def parse(
         self, directory: Path
     ) -> Tuple[List[BBoxItem], List[GapItem]]:
@@ -69,21 +72,20 @@ class MetadataHandler(ABC):
                 if key not in pairs:
                     pairs[key] = nb["gap_mm"]
 
-        if not pairs:
-            return bboxes, []
-
-        # Detect corridor axis from neighbor pairs
-        axis = _detect_corridor_axis(items, pairs)
+        # Detect corridor axis
+        if pairs:
+            axis = _detect_corridor_axis(items, pairs)
+        else:
+            axis = _detect_corridor_axis_from_spread(items)
         cross_axis = 1 - axis
 
-        # Build GapItems
+        # Build neighbor gap annotations (above rack tops)
         gaps = []
         for (a_idx, b_idx), gap_mm in pairs.items():
             ra, rb = items[a_idx], items[b_idx]
             ac, asz = ra["center"], ra["size"]
             bc, bsz = rb["center"], rb["size"]
 
-            # Sort so a is the one with smaller corridor-axis position
             if ac[axis] > bc[axis]:
                 ac, asz, bc, bsz = bc, bsz, ac, asz
 
@@ -113,6 +115,66 @@ class MetadataHandler(ABC):
                 category=self.category,
             ))
 
+        # Build width annotations at Z=0, offset into corridor
+        # Cluster racks by cross-axis position to detect row sides
+        cross_positions = sorted(
+            [(r["center"][cross_axis], idx) for idx, r in items.items()])
+        rows = _cluster_cross_rows(cross_positions)
+
+        # For each row, determine inward direction (toward nearest other row)
+        row_means = [sum(x for x, _ in row) / len(row) for row in rows]
+        row_directions = {}  # idx → cross_sign
+        for ri, row in enumerate(rows):
+            mean = row_means[ri]
+            others = [m for i, m in enumerate(row_means) if i != ri]
+            if others:
+                nearest = min(others, key=lambda m: abs(m - mean))
+                sign = 1 if mean < nearest else -1
+            else:
+                sign = 1  # single row, default right
+            for _, idx in row:
+                row_directions[idx] = sign
+
+        for idx in sorted(items):
+            r = items[idx]
+            length_mm = r.get("length_mm")
+            if length_mm is None:
+                continue
+
+            c = r["center"]
+            sz = r["size"]
+            rack_left = c[axis] - sz[axis] / 2
+            rack_right = c[axis] + sz[axis] / 2
+            rack_cross = c[cross_axis]
+
+            cross_sign = row_directions.get(idx, 1)
+            bracket_cross = rack_cross + cross_sign * (
+                sz[cross_axis] / 2 + self._WIDTH_OFFSET)
+
+            # Anchor at the rack's inner face
+            rack_inner = rack_cross + cross_sign * sz[cross_axis] / 2
+
+            if axis == 1:
+                edge_a = [bracket_cross, rack_left, 0.0]
+                edge_b = [bracket_cross, rack_right, 0.0]
+                anchor_a = [rack_inner, rack_left, 0.0]
+                anchor_b = [rack_inner, rack_right, 0.0]
+                tick_dir = [cross_sign * 0.03, 0, 0]
+            else:
+                edge_a = [rack_left, bracket_cross, 0.0]
+                edge_b = [rack_right, bracket_cross, 0.0]
+                anchor_a = [rack_left, rack_inner, 0.0]
+                anchor_b = [rack_right, rack_inner, 0.0]
+                tick_dir = [0, cross_sign * 0.03, 0]
+
+            gaps.append(GapItem(
+                edge_a, edge_b, length_mm, axis, True,
+                anchor_a=anchor_a, anchor_b=anchor_b,
+                tick_dir=tick_dir,
+                color=self.gap_color,
+                category=self.category,
+            ))
+
         return bboxes, gaps
 
 
@@ -126,6 +188,27 @@ def _detect_corridor_axis(items, pairs):
         x_total += abs(ac[0] - bc[0])
         y_total += abs(ac[1] - bc[1])
     return 1 if y_total >= x_total else 0
+
+
+def _cluster_cross_rows(sorted_positions, gap_threshold=0.8):
+    """Group sorted (cross_val, idx) pairs into rows by cross-axis gaps."""
+    if not sorted_positions:
+        return []
+    rows = [[sorted_positions[0]]]
+    for i in range(1, len(sorted_positions)):
+        if sorted_positions[i][0] - sorted_positions[i - 1][0] > gap_threshold:
+            rows.append([])
+        rows[-1].append(sorted_positions[i])
+    return rows
+
+
+def _detect_corridor_axis_from_spread(items):
+    """Fallback: determine corridor axis from coordinate spread."""
+    xs = [r["center"][0] for r in items.values()]
+    ys = [r["center"][1] for r in items.values()]
+    dx = max(xs) - min(xs) if xs else 0
+    dy = max(ys) - min(ys) if ys else 0
+    return 1 if dy >= dx else 0
 
 
 class RackMetadataHandler(MetadataHandler):
