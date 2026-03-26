@@ -384,21 +384,31 @@ class LayerManager:
         )
 
     def load_single_file(self, path: str):
-        """Load a single PLY/OBJ file as one layer (appends to existing layers)."""
+        """Load a single PLY/OBJ file as one layer (appends to existing layers).
+
+        If a layer with the same path already exists, it is replaced
+        (reloaded from disk).
+        """
         from pathlib import Path
         from ..plugins.importers.loaders import load_geometry
-        
+        from ..ui.dialogs.folder_loading import _layer_id_for_path
+
+        layer_id = _layer_id_for_path(path)
+
+        # Evict existing layer with same path (reload scenario)
+        self.layers[:] = [l for l in self.layers if l.id != layer_id]
+
         ext = Path(path).suffix.lower()
         # Default type — load_geometry will upgrade to "mesh" or
         # "wireframe" if triangles/lines are found during parsing.
-        layer_type = "mesh" if ext == ".obj" else "pointcloud"
+        layer_type = "mesh" if ext in (".obj", ".stl") else "pointcloud"
 
         from .constants import AUTO_LAYER_COLORS
         color_idx = len(self.layers) % len(AUTO_LAYER_COLORS)
         auto_color = AUTO_LAYER_COLORS[color_idx] + [1.0]  # add alpha
         
         layer_def = {
-            "id": f"file_{len(self.layers)}",
+            "id": layer_id,
             "name": Path(path).name,
             "type": layer_type,
             "file": Path(path).name,

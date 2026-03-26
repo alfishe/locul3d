@@ -373,15 +373,22 @@ class ViewerWindow(QMainWindow):
             from ..ui.dialogs.folder_loading import (
                 FolderLoadWorker, FolderProgressDialog,
             )
+            existing_ids = {l.id for l in self.layer_manager.layers}
             file_names = [Path(p).name for p in geo_paths]
             folder = str(Path(geo_paths[0]).parent)
-            worker = FolderLoadWorker(geo_paths, self)
+            worker = FolderLoadWorker(geo_paths, self, existing_ids=existing_ids)
             dialog = FolderProgressDialog(folder, file_names, self)
             dialog.start(worker)
             dialog.exec()
 
             layers = dialog.get_result()
             if layers:
+                # Evict old layers/VBOs that are being replaced
+                for rid in worker.replaced_ids:
+                    self.viewport.delete_vbos_for_layer(rid)
+                    self.layer_manager.layers[:] = [
+                        l for l in self.layer_manager.layers if l.id != rid
+                    ]
                 self.layer_manager.base_dir = str(Path(geo_paths[0]).parent)
                 for layer in layers:
                     self.layer_manager.layers.append(layer)
@@ -575,20 +582,18 @@ class ViewerWindow(QMainWindow):
 
     def _on_clear_scene(self):
         """Remove all layers from the scene."""
-        self.viewport.delete_all_vbos()
         for layer in self.layer_manager.layers:
             layer.release_source_data()
         self.layer_manager.layers.clear()
         self.layer_manager.invalidate_scene_aabb()
-        self.viewport.scene_correction = SceneCorrection()
-        self.viewport.scene_clip = None
+
+        # Viewport reset — clears VBOs, correction, clip, panorama
+        self.viewport.reset()
+
         self._selected_layer = None
         self.info_panel.clear()
 
-        if (hasattr(self.viewport, '_panorama')
-                and self.viewport._panorama
-                and self.viewport._panorama.is_active):
-            self.viewport.exit_panorama()
+        if hasattr(self, 'layer_panel'):
             self.layer_panel.highlight_active_pano(None)
 
         self.layer_panel.rebuild()
