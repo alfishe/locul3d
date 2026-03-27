@@ -420,12 +420,80 @@ class E57ImportWorker(QThread):
         self.stage_progress.emit("Done", 100)
         return xyz, colors_u8, meta
 
+    @staticmethod
+    def _parse_prototype(xml_bytes):
+        """Parse the E57 XML prototype to discover field encodings.
+
+        Returns dict: field_name → {'type': 'float'|'scaledInteger'|'integer',
+                                     'scale': float, 'offset': float,
+                                     'bytes': int}
+        """
+        import re
+        xml_str = xml_bytes.decode('utf-8', errors='replace')
+
+        fields = {}
+        # Match prototype entries:
+        #   <cartesianX type="ScaledInteger" minimum="..." maximum="..." scale="..." offset="..."/>
+        #   <cartesianX type="Float" precision="single" .../>
+        #   <colorRed type="Integer" minimum="0" maximum="255"/>
+        proto_match = re.search(r'<prototype[^>]*>(.*?)</prototype>', xml_str,
+                                re.DOTALL)
+        if not proto_match:
+            return fields
+
+        proto = proto_match.group(1)
+        # Each field is a self-closing tag: <fieldName attr1="val" .../>
+        for m in re.finditer(
+                r'<(\w+)\s+([^>]*?)/>',
+                proto):
+            name = m.group(1)
+            attrs = m.group(2)
+
+            def _attr(key, default=None):
+                am = re.search(rf'{key}="([^"]*)"', attrs)
+                return am.group(1) if am else default
+
+            ftype = (_attr('type') or '').lower()
+            if ftype == 'scaledinteger':
+                scale = float(_attr('scale', '1'))
+                offset = float(_attr('offset', '0'))
+                mn, mx = int(_attr('minimum', '0')), int(_attr('maximum', '0'))
+                # Determine integer width from range
+                if mn >= -128 and mx <= 127:
+                    bpp = 1
+                elif mn >= -32768 and mx <= 32767:
+                    bpp = 2
+                else:
+                    bpp = 4
+                fields[name] = {'type': 'scaledInteger', 'scale': scale,
+                                'offset': offset, 'minimum': mn,
+                                'maximum': mx, 'bytes': bpp}
+            elif ftype == 'float':
+                prec = (_attr('precision') or 'single').lower()
+                bpp = 8 if prec == 'double' else 4
+                fields[name] = {'type': 'float', 'scale': 1.0,
+                                'offset': 0.0, 'bytes': bpp}
+            elif ftype == 'integer':
+                mn = int(_attr('minimum', '0'))
+                mx = int(_attr('maximum', '255'))
+                if mx <= 255 and mn >= 0:
+                    bpp = 1
+                elif mx <= 65535 and mn >= 0:
+                    bpp = 2
+                else:
+                    bpp = 4
+                fields[name] = {'type': 'integer', 'scale': 1.0,
+                                'offset': 0.0, 'bytes': bpp}
+        return fields
+
     def _fast_binary_read(self, path, n, has_rgb, field_names):
         """Vectorized E57 binary reader -- bypasses libE57Format codec.
 
-        Performance-critical path: partial CRC strip + single-pass F-order
-        extraction.  Benchmarked at ~1500 MB/s effective throughput (3.2s for
-        5 GB / 348M pts), bounded by SSD sequential read.
+        Adapts to the actual E57 data structure by parsing the XML
+        prototype to discover field encodings:
+          - Float (single/double): read as float32/float64
+          - ScaledInteger: read as int32, convert via value * scale + offset
+          - Integer: read as uint8/uint16/uint32
 
         E57 page layout: every 1024 physical bytes, the last 4 are a CRC32C
         checksum.  The first 1020 bytes carry payload ("logical" bytes).
@@ -470,18 +538,34 @@ class E57ImportWorker(QThread):
         file_mb = len(raw_arr) / 1024**2
         self._log(f"File read: {t_read:.2f}s ({file_mb / t_read:.0f} MB/s)")
 
-        # -- 2. Parse E57 header → XML → CV offset (tiny, not timed) ------
+        # -- 2. Parse E57 header → XML → CV offset + field types ----------
         raw_hdr = bytes(raw_arr[:48])
         xml_phys_off = struct.unpack_from('<Q', raw_hdr, 24)[0]
         xml_phys_len = struct.unpack_from('<Q', raw_hdr, 32)[0]
 
-        xml_bytes = _strip_crc_region(raw_arr, xml_phys_off, xml_phys_len).tobytes()
+        xml_bytes = _strip_crc_region(raw_arr, xml_phys_off,
+                                      xml_phys_len).tobytes()
         m = re.search(rb'fileOffset="(\d+)"', xml_bytes)
         cv_phys_off = int(m.group(1)) if m else 48
 
+        # Parse field encodings from prototype
+        proto = self._parse_prototype(xml_bytes)
+        xyz_proto = proto.get('cartesianX', {})
+        xyz_type = xyz_proto.get('type', 'float')
+        xyz_scale = xyz_proto.get('scale', 1.0)
+        xyz_offset = xyz_proto.get('offset', 0.0)
+        xyz_minimum = xyz_proto.get('minimum', 0)
+        if xyz_type == 'scaledInteger':
+            self._log(f"XYZ encoding: ScaledInteger "
+                      f"(scale={xyz_scale:.2e}, offset={xyz_offset}, "
+                      f"minimum={xyz_minimum})")
+        else:
+            self._log(f"XYZ encoding: {xyz_type}")
+
         first_pkt_log = _phys_to_log(cv_phys_off) + 32
         first_pkt_phys = _log_to_phys(first_pkt_log)
-        self._log(f"CV phys={cv_phys_off}, first data pkt at log={first_pkt_log}")
+        self._log(f"CV phys={cv_phys_off}, first data pkt at "
+                  f"log={first_pkt_log}")
 
         # -- 3. Parse first data packet header for stream layout -----------
         pkt_hdr_bytes = _strip_crc_region(raw_arr, first_pkt_phys, 256)
@@ -495,7 +579,10 @@ class E57ImportWorker(QThread):
         pkt_header = 6 + bcount * 2
         bslens = struct.unpack(
             f'<{bcount}H', pkt_hdr_bytes[6:pkt_header].tobytes())
-        pts_per_pkt = bslens[x_idx] // 4  # float32 = 4 bytes
+
+        # Derive bytes-per-point from stream layout (4 for float32/int32)
+        xyz_bpp = proto.get('cartesianX', {}).get('bytes', 4)
+        pts_per_pkt = bslens[x_idx] // xyz_bpp
 
         n_full = (n // pts_per_pkt) * pts_per_pkt
         n_pkts = n_full // pts_per_pkt
@@ -503,17 +590,24 @@ class E57ImportWorker(QThread):
                   f"{pts_per_pkt} pts/pkt, {n_pkts} packets")
 
         # -- 4+5. Chunked CRC strip + extraction ----------------------------
-        #    Process the file in ~500 MB chunks to keep peak memory low.
-        #    Each chunk: read raw pages → CRC strip → extract fields.
-        #    Peak overhead: ~1 GB (chunk buffer) beyond the output arrays.
         t0 = time.time()
         x_off = pkt_header + sum(bslens[:x_idx])
         y_off = pkt_header + sum(bslens[:y_idx])
         z_off = pkt_header + sum(bslens[:z_idx])
         x_len = bslens[x_idx]
 
+        # Output array (always float32, F-order for column-contiguous access)
         xyz = np.empty((n_full, 3), dtype=np.float32, order='F')
         xc, yc, zc = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+
+        # Choose extraction buffer based on field encoding
+        is_scaled = (xyz_type == 'scaledInteger')
+        if is_scaled:
+            # Separate uint32 buffer — E57 stores unsigned offset from minimum
+            xyz_raw = np.empty((n_full, 3), dtype=np.uint32, order='F')
+            xr, yr, zr = xyz_raw[:, 0], xyz_raw[:, 1], xyz_raw[:, 2]
+        else:
+            xr, yr, zr = xc, yc, zc
 
         colors_u8 = None
         if has_rgb:
@@ -545,15 +639,17 @@ class E57ImportWorker(QThread):
             c_local = c_log_start - c_start_page * DATA_PER_PAGE
             d = c_logical[c_local:]
 
+            raw_view_dtype = np.uint32 if is_scaled else np.float32
+
             # Extract fields from this chunk (F-order columns are contiguous)
             for i in range(chunk_n):
                 o = i * pkt_size
                 pkt_idx = chunk_start + i
                 s = pkt_idx * pts_per_pkt
                 e = s + pts_per_pkt
-                xc[s:e] = d[o + x_off : o + x_off + x_len].view(np.float32)
-                yc[s:e] = d[o + y_off : o + y_off + x_len].view(np.float32)
-                zc[s:e] = d[o + z_off : o + z_off + x_len].view(np.float32)
+                xr[s:e] = d[o + x_off : o + x_off + x_len].view(raw_view_dtype)
+                yr[s:e] = d[o + y_off : o + y_off + x_len].view(raw_view_dtype)
+                zr[s:e] = d[o + z_off : o + z_off + x_len].view(raw_view_dtype)
                 if colors_u8 is not None:
                     rc[s:e] = d[o + r_off : o + r_off + r_len]
                     gc_[s:e] = d[o + g_off : o + g_off + r_len]
@@ -561,9 +657,37 @@ class E57ImportWorker(QThread):
 
             del c_region, c_pages, c_logical, d
 
+        # -- ScaledInteger → float32 conversion ----------------------------
+        if is_scaled:
+            scale_f = np.float64(xyz_scale)
+            min_f = np.float64(xyz_minimum)
+            off_f = np.float64(xyz_offset)
+
+            # E57 ScaledInteger: stored as unsigned offset from minimum.
+            #   real = (stored_uint32 + minimum) * scale + offset
+            # minimum is negative (-2147483647), so uint32 + min gives
+            # the signed raw value.
+            xc[:] = ((xyz_raw[:, 0].astype(np.float64) + min_f) * scale_f
+                     + off_f).astype(np.float32)
+            yc[:] = ((xyz_raw[:, 1].astype(np.float64) + min_f) * scale_f
+                     + off_f).astype(np.float32)
+            zc[:] = ((xyz_raw[:, 2].astype(np.float64) + min_f) * scale_f
+                     + off_f).astype(np.float32)
+            del xyz_raw
+
+            self._log(f"ScaledInteger → float32 conversion applied "
+                      f"(scale={xyz_scale:.2e}, {n_full:,} pts)")
+
         t_parse = time.time() - t0
         self._log(f"Chunked parse: {t_parse:.2f}s "
                   f"({n_full / t_parse / 1e6:.1f} Mpts/s)")
+
+        # Integrity check: reject if data is garbage
+        sample = xyz[::max(1, n_full // 10000)]
+        if np.isnan(sample).any() or np.isinf(sample).any():
+            del raw_arr
+            gc.collect()
+            raise ValueError("Fast read produced NaN/Inf — falling back")
 
         del raw_arr
         gc.collect()
