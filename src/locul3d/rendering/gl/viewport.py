@@ -630,10 +630,17 @@ class BaseGLViewport(QOpenGLWidget):
         # needed.  RGB vertex colors have implicit alpha=1.0; we modulate
         # the final fragment alpha via GL_CONSTANT_ALPHA so that changing
         # the opacity slider is instant even for 100M-point layers.
+        #
+        # For opaque layers: DISABLE blending to prevent color accumulation
+        # when overlapping layers share coordinates (GL_POINT_SMOOTH edges
+        # would bleed through otherwise).
         needs_blend = layer.opacity < 0.99
         if needs_blend:
+            glEnable(GL_BLEND)
             glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
             glBlendColor(0.0, 0.0, 0.0, layer.opacity)
+        else:
+            glDisable(GL_BLEND)
 
         glDrawArrays(GL_POINTS, 0, draw_count)
 
@@ -651,6 +658,7 @@ class BaseGLViewport(QOpenGLWidget):
         if render_on_top:
             glEnable(GL_DEPTH_TEST)
 
+        glEnable(GL_BLEND)
         glEnable(GL_LIGHTING)
 
     def _draw_mesh_layer(self, layer):

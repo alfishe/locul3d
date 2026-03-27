@@ -139,7 +139,7 @@ class EditorViewport(BaseGLViewport):
             glActiveTexture(GL_TEXTURE0)
             glBindTexture(GL_TEXTURE_2D, 0)
             glDisable(GL_TEXTURE_2D)
-            glEnable(GL_BLEND)
+            glDisable(GL_BLEND)
             glEnable(GL_DEPTH_TEST)
         except ImportError:
             pass
