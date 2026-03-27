@@ -683,35 +683,12 @@ class EditorWindow(QMainWindow):
         self._try_load_sidecar(path)
 
     def _load_folder(self, folder: str):
-        """Load all .ply files from a folder, applying layers.json manifest if present.
+        """Load all .ply files from a folder, appending to the current scene.
 
-        Fully resets internal state before loading so the new folder opens
-        from scratch (not appending to current layers).
+        Applies layers.json manifest if present.
         Camera is fitted once after all files load.
+        Use Clear Scene to reset state before loading.
         """
-        # --- Full reset ---
-        self.gl_viewport.delete_all_vbos()
-        self.layer_manager.layers.clear()
-        self.layer_manager.invalidate_scene_aabb()
-        self.annotations.clear()
-        self.planes.clear()
-        self.gap_items.clear()
-        self.gl_viewport.gaps = self.gap_items
-        self.gl_viewport.scene_bboxes = []
-        self.layer_panel.annotation_groups = []
-        self._undo_stack.clear()
-        self._yaml_path = None
-        self._color_idx = 0
-        self._plane_color_idx = 0
-        self.gl_viewport.selected_idx = -1
-        self.gl_viewport.scene_correction = SceneCorrection()
-        self.gl_viewport.scene_clip = None
-        self.gl_viewport.set_correction_diagnostics(None)
-        self._ref_point = None
-        self.gl_viewport.ref_point = None
-        self.bbox_panel.rebuild_list()
-        self.plane_panel.rebuild_list()
-        self.info_panel.clear()
 
         # --- Load new folder ---
         folder_path = Path(folder)
