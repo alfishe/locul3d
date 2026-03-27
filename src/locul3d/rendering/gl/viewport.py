@@ -693,13 +693,17 @@ class BaseGLViewport(QOpenGLWidget):
 
         needs_blend = layer.opacity < 0.99
         if needs_blend:
+            glEnable(GL_BLEND)
             glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
             glBlendColor(0.0, 0.0, 0.0, layer.opacity)
+        else:
+            glDisable(GL_BLEND)
 
         glDrawElements(GL_TRIANGLES, layer.tri_count * 3, GL_UNSIGNED_INT, None)
 
         if needs_blend:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_BLEND)
 
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
@@ -729,8 +733,11 @@ class BaseGLViewport(QOpenGLWidget):
 
         needs_blend = layer.opacity < 0.99
         if needs_blend:
+            glEnable(GL_BLEND)
             glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
             glBlendColor(0.0, 0.0, 0.0, layer.opacity)
+        else:
+            glDisable(GL_BLEND)
 
         pts = layer.line_points
         glBegin(GL_LINES)
@@ -740,6 +747,7 @@ class BaseGLViewport(QOpenGLWidget):
 
         if needs_blend:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_BLEND)
 
         glEnable(GL_LIGHTING)
 
