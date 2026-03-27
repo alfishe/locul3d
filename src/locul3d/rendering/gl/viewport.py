@@ -99,7 +99,7 @@ class BaseGLViewport(QOpenGLWidget):
         )
         self.fps_camera = False  # True = first-person camera (cam_distance=0)
         self.point_attenuation = False  # True = perspective-correct 1/d point size falloff
-        self.auto_scale_small_points = True  # True = enlarge points for small/sparse layers
+        self.auto_scale_small_points = True  # True = uniform adaptive point sizing
         self._saved_cam_distance = None  # orbital distance saved when entering FPS
         self._fps_movement_was_manual = (
             False  # track if user had fps_movement on before fps_camera
@@ -433,10 +433,11 @@ class BaseGLViewport(QOpenGLWidget):
         # Global interactive stride: cap total drawn points during
         # mouse-drag so aggregate draw stays within budget.
         INTERACTIVE_BUDGET = 25_000_000
+        total_vis = sum(
+            l.point_count for l in visible if l.layer_type == "pointcloud"
+        )
+        self._total_vis_pts = total_vis  # cached for uniform point sizing
         if self._interacting:
-            total_vis = sum(
-                l.point_count for l in visible if l.layer_type == "pointcloud"
-            )
             self._global_interact_stride = (
                 max(1, total_vis // INTERACTIVE_BUDGET)
                 if total_vis > INTERACTIVE_BUDGET
@@ -526,29 +527,9 @@ class BaseGLViewport(QOpenGLWidget):
 
         glDisable(GL_LIGHTING)
 
-        # Use larger point size for small point clouds (better visibility)
-        if self.auto_scale_small_points and layer.point_count < 10000:
-            base_size = self.point_size * 2.5
-        else:
-            base_size = self.point_size
-
-        # Scale point size with zoom only for sparse layers (<100k pts)
-        if (
-            self.auto_scale_small_points
-            and layer.point_count < 100000
-            and layer.id != "raw_scan"
-            and self._scene_radius > 0
-        ):
-            ref_distance = self._scene_radius * 2.5
-            zoom_ratio = ref_distance / max(self.cam_distance, 0.1)
-            zoom_scale = max(1.0, min(zoom_ratio, 10.0))
-            base_size *= zoom_scale
+        base_size = self.point_size
 
         if self.point_attenuation:
-            # Perspective-correct point size: OpenGL's distance attenuation scales
-            # each point as  effective_px = base_size * sqrt(1/(a + b*d + c*d²)).
-            # With a=0, b=0, c=1/ref_d²  this gives  effective_px = base_size/d * ref_d,
-            # i.e. a 1/d falloff anchored so that a point at cam_distance gets base_size px.
             ref_d = max(self.cam_distance, 0.5)
             c_att = 1.0 / (ref_d * ref_d)
             glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, [0.0, 0.0, c_att])
@@ -557,8 +538,7 @@ class BaseGLViewport(QOpenGLWidget):
 
         glPointSize(base_size)
 
-        # Disable depth test for small point clouds
-        render_on_top = self.auto_scale_small_points and layer.point_count < 10000
+        render_on_top = False
         if render_on_top:
             glDisable(GL_DEPTH_TEST)
 
