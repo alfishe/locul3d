@@ -499,24 +499,14 @@ class ViewerWindow(QMainWindow):
         self._try_load_sidecar(path)
 
     def _load_folder(self, folder: str):
-        """Load all geometry files from a folder.
-
-        Fully resets internal state before loading so the new folder opens
-        from scratch (not appending to current layers).
+        """Load all geometry files from a folder, appending to the current scene.
 
         Scans for .ply, .obj, .stl files and loads them without fitting camera
         per file.  E57 files are routed through the import pipeline.
         If a layers.json manifest exists, layer colors/names/visibility are
         applied from it.  Camera is fitted once after all files load.
+        Use Clear Scene to reset state before loading.
         """
-        # --- Full reset ---
-        self.viewport.delete_all_vbos()
-        self.layer_manager.layers.clear()
-        self.layer_manager.invalidate_scene_aabb()
-        self.viewport.scene_correction = SceneCorrection()
-        self.viewport.scene_clip = None
-        self._selected_layer = None
-        self.info_panel.clear()
 
         # Exit panorama mode if active
         if (hasattr(self.viewport, '_panorama')
