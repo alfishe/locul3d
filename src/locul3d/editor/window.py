@@ -799,9 +799,10 @@ class EditorWindow(QMainWindow):
             self.gl_viewport.gaps = self.gap_items
             self.layer_panel.annotation_groups.extend(new_groups)
         else:
-            # Replace previous pipeline annotations
-            self.annotations = [a for a in self.annotations
-                                if not getattr(a, 'scene_coords', False)]
+            # Replace previous pipeline annotations (mutate in-place to
+            # keep bbox_panel.annotations reference valid)
+            self.annotations[:] = [a for a in self.annotations
+                                   if not getattr(a, 'scene_coords', False)]
             self.annotations.extend(new_bboxes)
             self.gl_viewport.scene_bboxes = new_bboxes
             self.gap_items = new_gaps
@@ -835,8 +836,9 @@ class EditorWindow(QMainWindow):
             # Store pipeline bboxes in scene-space list (post-correction rendering)
             self.gl_viewport.scene_bboxes = bboxes
             # Remove any previous pipeline bboxes before appending new ones
-            self.annotations = [a for a in self.annotations
-                                if not getattr(a, 'scene_coords', False)]
+            # (mutate in-place to keep bbox_panel.annotations reference valid)
+            self.annotations[:] = [a for a in self.annotations
+                                   if not getattr(a, 'scene_coords', False)]
             # Also add to annotations so they appear in the bbox panel list
             for bbox in bboxes:
                 bbox.scene_coords = True  # flag: drawn in scene space, skip in _draw_annotations
