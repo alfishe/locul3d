@@ -1,5 +1,6 @@
 """Metadata handlers for pipeline object-cluster directories."""
 
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Tuple
@@ -36,7 +37,15 @@ class MetadataHandler(ABC):
     def parse(
         self, directory: Path
     ) -> Tuple[List[BBoxItem], List[GapItem]]:
-        """Parse metadata files → (bboxes, gaps)."""
+        """Parse metadata files → (bboxes, gaps).
+
+        Supports two metadata formats:
+          - Legacy: has "index", "length_mm", "neighbor_left"/"neighbor_right"
+                    dicts, "distance_to_high_wall_mm", "wall_high"
+          - Current: index in filename, "width_mm", "neighbor_left_mm"/
+                     "neighbor_right_mm" scalars, "distance_wall_a_mm"/
+                     "distance_wall_b_mm"
+        """
         if not _HAS_YAML:
             return [], []
 
@@ -47,7 +56,22 @@ class MetadataHandler(ABC):
                 data = yaml.safe_load(f)
             if data is None:
                 continue
-            items[data["index"]] = data
+            # Extract index: from data or from filename
+            if "index" in data:
+                idx = data["index"]
+            else:
+                m = re.search(r'_(\d+)_metadata', path.stem)
+                if not m:
+                    continue
+                idx = int(m.group(1))
+            items[idx] = data
+
+        if not items:
+            return [], []
+
+        # Detect format: new format has "width_mm", legacy has "length_mm"
+        sample = next(iter(items.values()))
+        new_format = "width_mm" in sample and "index" not in sample
 
         # Create BBoxItems
         bboxes = []
@@ -60,26 +84,31 @@ class MetadataHandler(ABC):
                 color=list(self.bbox_color),
             ))
 
-        # Deduplicate neighbor pairs
-        pairs = {}  # (min_idx, max_idx) → gap_mm
-        for idx, r in items.items():
-            for side in ("neighbor_left", "neighbor_right"):
-                nb = r.get(side)
-                if nb is None:
-                    continue
-                other = nb[self.neighbor_index_key]
-                if other not in items:
-                    continue
-                key = (min(idx, other), max(idx, other))
-                if key not in pairs:
-                    pairs[key] = nb["gap_mm"]
-
         # Detect corridor axis
-        if pairs:
-            axis = _detect_corridor_axis(items, pairs)
-        else:
-            axis = _detect_corridor_axis_from_spread(items)
+        axis = _detect_corridor_axis_from_spread(items)
         cross_axis = 1 - axis
+
+        # Build neighbor gap pairs
+        pairs = {}  # (min_idx, max_idx) → gap_mm
+        if new_format:
+            pairs = _compute_neighbor_pairs_from_scalars(items, axis)
+        else:
+            # Legacy format: neighbor dicts with index and gap
+            for idx, r in items.items():
+                for side in ("neighbor_left", "neighbor_right"):
+                    nb = r.get(side)
+                    if nb is None:
+                        continue
+                    other = nb[self.neighbor_index_key]
+                    if other not in items:
+                        continue
+                    key = (min(idx, other), max(idx, other))
+                    if key not in pairs:
+                        pairs[key] = nb["gap_mm"]
+            # Refine axis from explicit pairs if available
+            if pairs:
+                axis = _detect_corridor_axis(items, pairs)
+                cross_axis = 1 - axis
 
         # Build neighbor gap annotations (above rack tops)
         gaps = []
@@ -139,7 +168,8 @@ class MetadataHandler(ABC):
 
         for idx in sorted(items):
             r = items[idx]
-            length_mm = r.get("length_mm")
+            # Support both "length_mm" (legacy) and "width_mm" (current)
+            length_mm = r.get("length_mm") or r.get("width_mm")
             if length_mm is None:
                 continue
 
@@ -185,25 +215,26 @@ class MetadataHandler(ABC):
                 row_items.setdefault(ri, []).append((idx, items[idx]))
 
         for ri, rack_list in row_items.items():
-            # Filter to racks that have wall distance data
-            with_wall = [(idx, r) for idx, r in rack_list
-                         if r.get("distance_to_high_wall_mm") is not None
-                         and r.get("wall_high") is not None]
+            # Normalize wall distance data for both formats
+            with_wall = []
+            for idx, r in rack_list:
+                wall_dist, wall_coord = _get_wall_distance(r, axis)
+                if wall_dist is not None and wall_coord is not None:
+                    with_wall.append((idx, r, wall_dist, wall_coord))
             if not with_wall:
                 continue
 
             # Sort by distance (closest to wall → smallest offset)
-            with_wall.sort(key=lambda x: x[1]["distance_to_high_wall_mm"])
+            with_wall.sort(key=lambda x: x[2])
 
-            wall_high = with_wall[0][1]["wall_high"]
+            wall_high = with_wall[0][3]
             cross_sign = row_directions.get(with_wall[0][0], 1)
             # Row's mean inner face for consistent spine position
-            row_cross = sum(r["center"][cross_axis] for _, r in with_wall) / len(with_wall)
-            mean_half = sum(r["size"][cross_axis] / 2 for _, r in with_wall) / len(with_wall)
+            row_cross = sum(r["center"][cross_axis] for _, r, _, _ in with_wall) / len(with_wall)
+            mean_half = sum(r["size"][cross_axis] / 2 for _, r, _, _ in with_wall) / len(with_wall)
             row_inner = row_cross + cross_sign * mean_half
 
-            for step_i, (idx, r) in enumerate(with_wall):
-                wall_dist = r["distance_to_high_wall_mm"]
+            for step_i, (idx, r, wall_dist, _wall_coord) in enumerate(with_wall):
                 c = r["center"]
                 sz = r["size"]
                 rack_far = c[axis] + sz[axis] / 2
@@ -247,7 +278,7 @@ class MetadataHandler(ABC):
                 spine_a = [wall_high, inner_cross, 0.0]
                 spine_b = [wall_high, outer_cross, 0.0]
             gaps.append(GapItem(
-                spine_a, spine_b, -1, cross_axis, True,
+                spine_a, spine_b, None, cross_axis, True,
                 anchor_a=spine_a, anchor_b=spine_b,
                 tick_dir=[0, 0, 0],
                 color=self.wall_dist_color,
@@ -288,6 +319,61 @@ def _detect_corridor_axis_from_spread(items):
     dx = max(xs) - min(xs) if xs else 0
     dy = max(ys) - min(ys) if ys else 0
     return 1 if dy >= dx else 0
+
+
+def _compute_neighbor_pairs_from_scalars(items, axis):
+    """Build neighbor pairs from new-format neighbor_left_mm/neighbor_right_mm.
+
+    Sorts racks by corridor-axis position within each cross-axis row.
+    For consecutive racks, uses neighbor_right_mm of the lower-position
+    rack (or neighbor_left_mm of the higher-position rack) as the gap.
+    """
+    cross_axis = 1 - axis
+    cross_positions = sorted(
+        [(r["center"][cross_axis], idx) for idx, r in items.items()])
+    rows = _cluster_cross_rows(cross_positions)
+
+    pairs = {}
+    for row in rows:
+        # Sort row items by corridor-axis position
+        row_sorted = sorted(row, key=lambda x: items[x[1]]["center"][axis])
+        for i in range(len(row_sorted) - 1):
+            _, idx_a = row_sorted[i]
+            _, idx_b = row_sorted[i + 1]
+            ra, rb = items[idx_a], items[idx_b]
+            # Prefer neighbor_right_mm of left rack, fall back to neighbor_left_mm of right rack
+            gap_mm = ra.get("neighbor_right_mm")
+            if gap_mm is None:
+                gap_mm = rb.get("neighbor_left_mm")
+            if gap_mm is not None:
+                key = (min(idx_a, idx_b), max(idx_a, idx_b))
+                pairs[key] = float(gap_mm)
+    return pairs
+
+
+def _get_wall_distance(rack_data, axis):
+    """Extract wall distance (mm) and wall coordinate for a rack.
+
+    Returns (distance_mm, wall_coordinate) or (None, None).
+
+    Supports:
+      - Legacy: "distance_to_high_wall_mm" + "wall_high"
+      - Current: "distance_wall_a_mm" + "distance_wall_b_mm"
+        Always uses wall B (high end of corridor axis).
+    """
+    # Legacy format
+    if "distance_to_high_wall_mm" in rack_data and "wall_high" in rack_data:
+        return rack_data["distance_to_high_wall_mm"], rack_data["wall_high"]
+
+    # Current format — always use wall B
+    db = rack_data.get("distance_wall_b_mm")
+    if db is None:
+        return None, None
+
+    c = rack_data["center"]
+    sz = rack_data["size"]
+    wall_coord = c[axis] + sz[axis] / 2 + db / 1000.0
+    return db, wall_coord
 
 
 class RackMetadataHandler(MetadataHandler):

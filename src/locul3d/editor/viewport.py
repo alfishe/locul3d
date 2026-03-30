@@ -581,7 +581,7 @@ class EditorViewport(BaseGLViewport):
             mid = (gap.edge_a + gap.edge_b) / 2.0
             sx, sy = project_to_screen(mid, mv, proj, vp)
 
-            if gap.gap_mm < 0:
+            if gap.gap_mm is None:
                 continue  # spine connector — no label
             text = f"{gap.gap_mm:.0f}mm"
             fm = painter.fontMetrics()
