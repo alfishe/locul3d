@@ -24,6 +24,8 @@ class MetadataHandler(ABC):
     bbox_color: tuple  # RGB 0-1
     gap_color: tuple  # RGB 0-1
     neighbor_index_key: str  # key in neighbor dict, e.g. "rack_index"
+    use_item_z: bool = False  # True = annotations at item Z; False = at Z=0
+    skip_neighbor_gaps: bool = False  # True = don't compute neighbor pairs
 
     def detect(self, directory: Path) -> bool:
         """Return True if this handler's metadata files exist in directory."""
@@ -60,10 +62,11 @@ class MetadataHandler(ABC):
             if "index" in data:
                 idx = data["index"]
             else:
-                m = re.search(r'_(\d+)_metadata', path.stem)
-                if not m:
-                    continue
-                idx = int(m.group(1))
+                # Match all digits between last prefix and _metadata,
+                # e.g. "rack_3_metadata" → "3", "mts_box_10_2_metadata" → "10_2"
+                stem = path.stem.removesuffix("_metadata")
+                # Use sequential index keyed on filename for uniqueness
+                idx = len(items)
             items[idx] = data
 
         if not items:
@@ -90,7 +93,9 @@ class MetadataHandler(ABC):
 
         # Build neighbor gap pairs
         pairs = {}  # (min_idx, max_idx) → gap_mm
-        if new_format:
+        if self.skip_neighbor_gaps:
+            pass
+        elif new_format:
             pairs = _compute_neighbor_pairs_from_scalars(items, axis)
         else:
             # Legacy format: neighbor dicts with index and gap
@@ -175,6 +180,7 @@ class MetadataHandler(ABC):
 
             c = r["center"]
             sz = r["size"]
+            ann_z = c[2] if self.use_item_z else 0.0
             rack_left = c[axis] - sz[axis] / 2
             rack_right = c[axis] + sz[axis] / 2
             rack_cross = c[cross_axis]
@@ -187,16 +193,16 @@ class MetadataHandler(ABC):
             rack_inner = rack_cross + cross_sign * sz[cross_axis] / 2
 
             if axis == 1:
-                edge_a = [bracket_cross, rack_left, 0.0]
-                edge_b = [bracket_cross, rack_right, 0.0]
-                anchor_a = [rack_inner, rack_left, 0.0]
-                anchor_b = [rack_inner, rack_right, 0.0]
+                edge_a = [bracket_cross, rack_left, ann_z]
+                edge_b = [bracket_cross, rack_right, ann_z]
+                anchor_a = [rack_inner, rack_left, ann_z]
+                anchor_b = [rack_inner, rack_right, ann_z]
                 tick_dir = [cross_sign * 0.03, 0, 0]
             else:
-                edge_a = [rack_left, bracket_cross, 0.0]
-                edge_b = [rack_right, bracket_cross, 0.0]
-                anchor_a = [rack_left, rack_inner, 0.0]
-                anchor_b = [rack_right, rack_inner, 0.0]
+                edge_a = [rack_left, bracket_cross, ann_z]
+                edge_b = [rack_right, bracket_cross, ann_z]
+                anchor_a = [rack_left, rack_inner, ann_z]
+                anchor_b = [rack_right, rack_inner, ann_z]
                 tick_dir = [0, cross_sign * 0.03, 0]
 
             gaps.append(GapItem(
@@ -237,6 +243,7 @@ class MetadataHandler(ABC):
             for step_i, (idx, r, wall_dist, _wall_coord) in enumerate(with_wall):
                 c = r["center"]
                 sz = r["size"]
+                ann_z = c[2] if self.use_item_z else 0.0
                 rack_far = c[axis] + sz[axis] / 2
                 rack_inner = c[cross_axis] + cross_sign * sz[cross_axis] / 2
 
@@ -245,16 +252,16 @@ class MetadataHandler(ABC):
                     self._WALL_DIST_OFFSET + step_i * 0.08)
 
                 if axis == 1:
-                    edge_a = [bracket_cross, rack_far, 0.0]
-                    edge_b = [bracket_cross, wall_high, 0.0]
-                    anchor_a = [rack_inner, rack_far, 0.0]
-                    anchor_b = [bracket_cross, wall_high, 0.0]
+                    edge_a = [bracket_cross, rack_far, ann_z]
+                    edge_b = [bracket_cross, wall_high, ann_z]
+                    anchor_a = [rack_inner, rack_far, ann_z]
+                    anchor_b = [bracket_cross, wall_high, ann_z]
                     tick_dir = [cross_sign * 0.03, 0, 0]
                 else:
-                    edge_a = [rack_far, bracket_cross, 0.0]
-                    edge_b = [wall_high, bracket_cross, 0.0]
-                    anchor_a = [rack_far, rack_inner, 0.0]
-                    anchor_b = [wall_high, bracket_cross, 0.0]
+                    edge_a = [rack_far, bracket_cross, ann_z]
+                    edge_b = [wall_high, bracket_cross, ann_z]
+                    anchor_a = [rack_far, rack_inner, ann_z]
+                    anchor_b = [wall_high, bracket_cross, ann_z]
                     tick_dir = [0, cross_sign * 0.03, 0]
 
                 gaps.append(GapItem(
@@ -268,15 +275,18 @@ class MetadataHandler(ABC):
 
             # Spine at wall_high connecting all bracket tips
             n = len(with_wall)
+            # Use mean Z of row items for spine
+            spine_z = (sum(r["center"][2] for _, r, _, _ in with_wall)
+                       / len(with_wall)) if self.use_item_z else 0.0
             inner_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
             outer_cross = row_inner + cross_sign * (
                 self._WALL_DIST_OFFSET + (n - 1) * 0.08)
             if axis == 1:
-                spine_a = [inner_cross, wall_high, 0.0]
-                spine_b = [outer_cross, wall_high, 0.0]
+                spine_a = [inner_cross, wall_high, spine_z]
+                spine_b = [outer_cross, wall_high, spine_z]
             else:
-                spine_a = [wall_high, inner_cross, 0.0]
-                spine_b = [wall_high, outer_cross, 0.0]
+                spine_a = [wall_high, inner_cross, spine_z]
+                spine_b = [wall_high, outer_cross, spine_z]
             gaps.append(GapItem(
                 spine_a, spine_b, None, cross_axis, True,
                 anchor_a=spine_a, anchor_b=spine_b,
@@ -396,3 +406,33 @@ class EmptySpaceMetadataHandler(MetadataHandler):
     bbox_color = (0.2, 0.4, 1.0)       # blue
     gap_color = (0.2, 0.9, 0.2)        # green
     neighbor_index_key = "empty_index"
+
+
+class MtsMetadataHandler(MetadataHandler):
+    """Parse mts_stack_N_metadata.yaml files into bbox + gap annotations."""
+
+    file_pattern = "mts_stack_*_metadata.yaml"
+    category = AnnotationCategory.MTS
+    display_name = "MTS Stacks"
+    bbox_color = (1.0, 0.8, 0.2)       # yellow
+    gap_color = (0.9, 0.6, 0.1)        # darker gold
+    neighbor_index_key = "mts_index"
+    use_item_z = True
+
+
+class MtsBoxMetadataHandler(MetadataHandler):
+    """Parse mts_box_N_M_metadata.yaml files into bbox + gap annotations.
+
+    MTS boxes are vertically stacked (Z-axis neighbors) with no wall distances.
+    Only bboxes and width annotations are produced; vertical neighbor gaps
+    are skipped since the bracket renderer works in X/Y.
+    """
+
+    file_pattern = "mts_box_*_metadata.yaml"
+    category = AnnotationCategory.MTS_BOX
+    display_name = "MTS Boxes"
+    bbox_color = (0.2, 0.8, 1.0)       # cyan (matches metadata color)
+    gap_color = (0.1, 0.6, 0.9)        # darker cyan
+    neighbor_index_key = "mts_box_index"
+    use_item_z = True
+    skip_neighbor_gaps = True  # neighbors are vertical (Z-axis)

@@ -10,6 +10,8 @@ class AnnotationCategory(enum.Enum):
     """Pipeline annotation category for grouping bboxes and gaps."""
     RACK = "rack"
     EMPTY_SPACE = "empty_space"
+    MTS = "mts"
+    MTS_BOX = "mts_box"
 
 
 class GapItem:

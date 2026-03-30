@@ -28,7 +28,7 @@ from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
 from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, PlaneItem
-from ..utils.metadata import RackMetadataHandler, EmptySpaceMetadataHandler
+from ..utils.metadata import RackMetadataHandler, EmptySpaceMetadataHandler, MtsMetadataHandler, MtsBoxMetadataHandler
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -878,7 +878,7 @@ class EditorWindow(QMainWindow):
     _RACK_GAP_ANNOT = (0.0, 0.85, 0.85)  # cyan — contrasts orange
     _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
 
-    _metadata_handlers = [RackMetadataHandler(), EmptySpaceMetadataHandler()]
+    _metadata_handlers = [RackMetadataHandler(), EmptySpaceMetadataHandler(), MtsMetadataHandler(), MtsBoxMetadataHandler()]
 
     def _parse_pipeline_context(self, data):
         """Parse pipeline_context.yaml → (list[BBoxItem], list[GapItem]).
