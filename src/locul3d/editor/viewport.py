@@ -523,21 +523,23 @@ class EditorViewport(BaseGLViewport):
                 barb = np.array([0, 0, arrow_sz * 0.5])
 
             glBegin(GL_LINES)
-            # Tick A: from anchor through edge to extended
-            glVertex3dv(a_extended)
-            glVertex3dv(gap.anchor_a)
-            # Tick B
-            glVertex3dv(b_extended)
-            glVertex3dv(gap.anchor_b)
-            # Arrow shaft
+            if gap.gap_mm is not None:
+                # Tick A: from anchor through edge to extended
+                glVertex3dv(a_extended)
+                glVertex3dv(gap.anchor_a)
+                # Tick B
+                glVertex3dv(b_extended)
+                glVertex3dv(gap.anchor_b)
+            # Shaft
             glVertex3dv(a)
             glVertex3dv(b)
-            # Arrowhead A
-            glVertex3dv(a); glVertex3dv(a + d_arrow + barb)
-            glVertex3dv(a); glVertex3dv(a + d_arrow - barb)
-            # Arrowhead B
-            glVertex3dv(b); glVertex3dv(b - d_arrow + barb)
-            glVertex3dv(b); glVertex3dv(b - d_arrow - barb)
+            if gap.gap_mm is not None:
+                # Arrowhead A
+                glVertex3dv(a); glVertex3dv(a + d_arrow + barb)
+                glVertex3dv(a); glVertex3dv(a + d_arrow - barb)
+                # Arrowhead B
+                glVertex3dv(b); glVertex3dv(b - d_arrow + barb)
+                glVertex3dv(b); glVertex3dv(b - d_arrow - barb)
             glEnd()
 
         glEnable(GL_DEPTH_TEST)

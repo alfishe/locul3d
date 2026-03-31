@@ -6,7 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, MeasurementType
+from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, MeasurementType, WallDistStyle
 
 try:
     import yaml
@@ -46,6 +46,7 @@ class MetadataHandler(ABC):
     gap_color: tuple  # RGB 0-1
     neighbor_index_key: str  # key in neighbor dict, e.g. "rack_index"
     use_item_z: bool = False  # True = annotations at item Z; False = at Z=0
+    wall_dist_style: WallDistStyle = WallDistStyle.STAGGERED
     # Which measurement types to generate (empty set = bboxes only)
     enabled_measurements: frozenset = frozenset({
         MeasurementType.DIMENSION,
@@ -253,76 +254,190 @@ class MetadataHandler(ABC):
 
             wall_high = with_wall[0][3]
             cross_sign = row_directions.get(with_wall[0][0], 1)
-            # Row's mean inner face for consistent spine position
             row_cross = sum(r["center"][cross_axis] for _, r, _, _ in with_wall) / len(with_wall)
             mean_half = sum(r["size"][cross_axis] / 2 for _, r, _, _ in with_wall) / len(with_wall)
             row_inner = row_cross + cross_sign * mean_half
 
-            for step_i, (idx, r, wall_dist, _wall_coord) in enumerate(with_wall):
-                c = r["center"]
-                sz = r["size"]
-                ann_z = c[2] if self.use_item_z else 0.0
-                rack_far = c[axis] + sz[axis] / 2
-                rack_inner = c[cross_axis] + cross_sign * sz[cross_axis] / 2
-
-                # Stagger: each rack at increasing offset from inner face
-                bracket_cross = row_inner + cross_sign * (
-                    self._WALL_DIST_OFFSET + step_i * 0.08)
-
-                if axis == 1:
-                    edge_a = [bracket_cross, rack_far, ann_z]
-                    edge_b = [bracket_cross, wall_high, ann_z]
-                    anchor_a = [rack_inner, rack_far, ann_z]
-                    anchor_b = [bracket_cross, wall_high, ann_z]
-                    tick_dir = [cross_sign * 0.03, 0, 0]
-                else:
-                    edge_a = [rack_far, bracket_cross, ann_z]
-                    edge_b = [wall_high, bracket_cross, ann_z]
-                    anchor_a = [rack_far, rack_inner, ann_z]
-                    anchor_b = [wall_high, bracket_cross, ann_z]
-                    tick_dir = [0, cross_sign * 0.03, 0]
-
-                wall_gap = GapItem(
-                    edge_a, edge_b, wall_dist, axis, True,
-                    anchor_a=anchor_a, anchor_b=anchor_b,
-                    tick_dir=tick_dir,
-                    color=self.wall_dist_color,
-                    category=self.category,
-                    label_t=0.05,
-                )
-                wall_gap.measurement_type = MeasurementType.WALL_DISTANCE
-                owner = idx_to_bbox.get(idx)
-                if owner:
-                    wall_gap.parent_bboxes = [owner]
-                gaps.append(wall_gap)
-
-            # Spine at wall_high connecting all bracket tips
-            n = len(with_wall)
-            # Use mean Z of row items for spine
-            spine_z = (sum(r["center"][2] for _, r, _, _ in with_wall)
-                       / len(with_wall)) if self.use_item_z else 0.0
-            inner_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
-            outer_cross = row_inner + cross_sign * (
-                self._WALL_DIST_OFFSET + (n - 1) * 0.08)
-            if axis == 1:
-                spine_a = [inner_cross, wall_high, spine_z]
-                spine_b = [outer_cross, wall_high, spine_z]
+            if self.wall_dist_style == WallDistStyle.COMB:
+                gaps.extend(self._build_wall_dist_comb(
+                    with_wall, idx_to_bbox, axis, cross_axis,
+                    cross_sign, row_inner, wall_high))
             else:
-                spine_a = [wall_high, inner_cross, spine_z]
-                spine_b = [wall_high, outer_cross, spine_z]
-            spine = GapItem(
-                spine_a, spine_b, None, cross_axis, True,
-                anchor_a=spine_a, anchor_b=spine_b,
-                tick_dir=[0, 0, 0],
-                color=self.wall_dist_color,
-                category=self.category,
-            )
-            spine.measurement_type = MeasurementType.WALL_DISTANCE
-            spine.parent_bboxes = [
-                b for b in [idx_to_bbox.get(idx) for idx, _, _, _ in with_wall] if b]
-            gaps.append(spine)
+                gaps.extend(self._build_wall_dist_staggered(
+                    with_wall, idx_to_bbox, axis, cross_axis,
+                    cross_sign, row_inner, wall_high))
 
         return bboxes, gaps
+
+    def _build_wall_dist_staggered(self, with_wall, idx_to_bbox, axis,
+                                    cross_axis, cross_sign, row_inner, wall_high):
+        """Staggered style: one parallel line per item, offset from each other."""
+        gaps = []
+        for step_i, (idx, r, wall_dist, _wc) in enumerate(with_wall):
+            c = r["center"]
+            sz = r["size"]
+            ann_z = c[2] if self.use_item_z else 0.0
+            rack_far = c[axis] + sz[axis] / 2
+            rack_inner = c[cross_axis] + cross_sign * sz[cross_axis] / 2
+            bracket_cross = row_inner + cross_sign * (
+                self._WALL_DIST_OFFSET + step_i * 0.08)
+
+            if axis == 1:
+                edge_a = [bracket_cross, rack_far, ann_z]
+                edge_b = [bracket_cross, wall_high, ann_z]
+                anchor_a = [rack_inner, rack_far, ann_z]
+                anchor_b = [bracket_cross, wall_high, ann_z]
+                tick_dir = [cross_sign * 0.03, 0, 0]
+            else:
+                edge_a = [rack_far, bracket_cross, ann_z]
+                edge_b = [wall_high, bracket_cross, ann_z]
+                anchor_a = [rack_far, rack_inner, ann_z]
+                anchor_b = [wall_high, bracket_cross, ann_z]
+                tick_dir = [0, cross_sign * 0.03, 0]
+
+            wall_gap = GapItem(
+                edge_a, edge_b, wall_dist, axis, True,
+                anchor_a=anchor_a, anchor_b=anchor_b,
+                tick_dir=tick_dir,
+                color=self.wall_dist_color,
+                category=self.category,
+                label_t=0.05,
+            )
+            wall_gap.measurement_type = MeasurementType.WALL_DISTANCE
+            owner = idx_to_bbox.get(idx)
+            if owner:
+                wall_gap.parent_bboxes = [owner]
+            gaps.append(wall_gap)
+
+        # Spine at wall_high connecting all bracket tips
+        n = len(with_wall)
+        spine_z = (sum(r["center"][2] for _, r, _, _ in with_wall)
+                   / len(with_wall)) if self.use_item_z else 0.0
+        inner_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
+        outer_cross = row_inner + cross_sign * (
+            self._WALL_DIST_OFFSET + (n - 1) * 0.08)
+        if axis == 1:
+            spine_a = [inner_cross, wall_high, spine_z]
+            spine_b = [outer_cross, wall_high, spine_z]
+        else:
+            spine_a = [wall_high, inner_cross, spine_z]
+            spine_b = [wall_high, outer_cross, spine_z]
+        spine = GapItem(
+            spine_a, spine_b, None, cross_axis, True,
+            anchor_a=spine_a, anchor_b=spine_b,
+            tick_dir=[0, 0, 0],
+            color=self.wall_dist_color,
+            category=self.category,
+        )
+        spine.measurement_type = MeasurementType.WALL_DISTANCE
+        spine.parent_bboxes = [
+            b for b in [idx_to_bbox.get(idx) for idx, _, _, _ in with_wall] if b]
+        gaps.append(spine)
+        return gaps
+
+    def _build_wall_dist_comb(self, with_wall, idx_to_bbox, axis,
+                               cross_axis, cross_sign, row_inner, wall_high):
+        """Comb style: central spine along corridor, cross-axis ticks to item projections.
+
+        Layout (for axis=1, Y=corridor, X=cross):
+          - Spine: vertical line along corridor axis (Y) at a central X,
+            from first to last item Y position
+          - Ticks: horizontal lines from spine to each item's X position,
+            at that item's Y — labeled with wall distance
+          - Projections: short corridor-axis bars at each item's floor
+            footprint showing the projected item outline
+        """
+        gaps = []
+        all_parents = [b for b in [idx_to_bbox.get(idx) for idx, _, _, _ in with_wall] if b]
+
+        # Spine X position: offset from row inner face into the corridor
+        spine_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
+
+        # Spine extent: from wall to farthest item from wall
+        item_positions = []
+        for _, r, _, _ in with_wall:
+            c = r["center"]
+            sz = r["size"]
+            item_positions.append(c[axis] - sz[axis] / 2)
+            item_positions.append(c[axis] + sz[axis] / 2)
+        # Find the item edge farthest from wall_high
+        farthest = max(item_positions, key=lambda p: abs(p - wall_high))
+        spine_start = wall_high
+        spine_end = farthest
+        spine_z = (sum(r["center"][2] for _, r, _, _ in with_wall)
+                   / len(with_wall)) if self.use_item_z else 0.0
+
+        # Spine: runs along corridor axis at spine_cross
+        if axis == 1:
+            spine_a = [spine_cross, spine_start, spine_z]
+            spine_b = [spine_cross, spine_end, spine_z]
+        else:
+            spine_a = [spine_start, spine_cross, spine_z]
+            spine_b = [spine_end, spine_cross, spine_z]
+        spine = GapItem(
+            spine_a, spine_b, None, axis, True,
+            anchor_a=spine_a, anchor_b=spine_b,
+            tick_dir=[0, 0, 0],
+            color=self.wall_dist_color,
+            category=self.category,
+        )
+        spine.measurement_type = MeasurementType.WALL_DISTANCE
+        spine.parent_bboxes = list(all_parents)
+        gaps.append(spine)
+
+        for idx, r, wall_dist, _wc in with_wall:
+            c = r["center"]
+            sz = r["size"]
+            item_cross = c[cross_axis]
+            item_corridor = c[axis]
+            ann_z = c[2] if self.use_item_z else 0.0
+
+            # Tick: from spine to near edge of item projection bar
+            half_cross = sz[cross_axis] / 2
+            item_near_edge = item_cross + cross_sign * half_cross
+            if axis == 1:
+                edge_a = [spine_cross, item_corridor, ann_z]
+                edge_b = [item_near_edge, item_corridor, ann_z]
+                tick_dir = [0, 0, 0.03]
+            else:
+                edge_a = [item_corridor, spine_cross, ann_z]
+                edge_b = [item_corridor, item_near_edge, ann_z]
+                tick_dir = [0, 0, 0.03]
+
+            tick = GapItem(
+                edge_a, edge_b, wall_dist, cross_axis, True,
+                anchor_a=edge_a, anchor_b=edge_b,
+                tick_dir=tick_dir,
+                color=self.wall_dist_color,
+                category=self.category,
+                label_t=0.5,
+            )
+            tick.measurement_type = MeasurementType.WALL_DISTANCE
+            owner = idx_to_bbox.get(idx)
+            if owner:
+                tick.parent_bboxes = [owner]
+            gaps.append(tick)
+
+            # Projection: item wall face projected on floor (along cross-axis)
+            if axis == 1:
+                proj_a = [item_cross - half_cross, item_corridor, ann_z]
+                proj_b = [item_cross + half_cross, item_corridor, ann_z]
+            else:
+                proj_a = [item_corridor, item_cross - half_cross, ann_z]
+                proj_b = [item_corridor, item_cross + half_cross, ann_z]
+            proj = GapItem(
+                proj_a, proj_b, None, cross_axis, True,
+                anchor_a=proj_a, anchor_b=proj_b,
+                tick_dir=[0, 0, 0],
+                color=self.bbox_color,
+                category=self.category,
+            )
+            proj.measurement_type = MeasurementType.WALL_DISTANCE
+            if owner:
+                proj.parent_bboxes = [owner]
+            gaps.append(proj)
+
+        return gaps
 
 
 def _detect_corridor_axis(items, pairs):
@@ -448,6 +563,7 @@ class MtsMetadataHandler(MetadataHandler):
     bbox_color = (1.0, 0.8, 0.2)       # yellow
     gap_color = (0.9, 0.6, 0.1)        # darker gold
     neighbor_index_key = "mts_index"
+    wall_dist_style = WallDistStyle.COMB
     enabled_measurements = frozenset({
         MeasurementType.NEIGHBOR,
         MeasurementType.WALL_DISTANCE,

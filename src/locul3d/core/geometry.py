@@ -13,6 +13,12 @@ class MeasurementType(enum.Enum):
     WALL_DISTANCE = "wall_dist"
 
 
+class WallDistStyle(enum.Enum):
+    """How wall distance annotations are displayed."""
+    STAGGERED = "staggered"  # one line per item, parallel staggered offsets
+    COMB = "comb"            # one spine, perpendicular ticks to each item
+
+
 class AnnotationCategory(enum.Enum):
     """Pipeline annotation category for grouping bboxes and gaps."""
     RACK = "rack"
