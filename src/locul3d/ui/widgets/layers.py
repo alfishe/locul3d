@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor, QColor, QMouseEvent
 
 from ...core.layer import LayerData, LayerManager
+from ...core.geometry import MeasurementType
 from ...core.constants import COLORS
 
 
@@ -209,7 +210,7 @@ class LayerRowWidget(QFrame):
 class AnnotationRowWidget(QFrame):
     """Expandable row for toggling visibility of an annotation group.
 
-    Group dict: {"name": str, "color": [r,g,b], "bboxes": list, "gaps": list}
+    Group dict: {"name": str, "color": [r,g,b], "bboxes": list, "measurements": list}
     Clicking the row expands to show per-bbox child checkboxes.
     """
 
@@ -241,15 +242,14 @@ class AnnotationRowWidget(QFrame):
         self.checkbox.toggled.connect(self._on_group_visibility)
         header_layout.addWidget(self.checkbox)
 
-        # Color swatch
-        swatch = QLabel()
-        swatch.setFixedSize(16, 12)
-        r, g, b = [int(c * 255) for c in group["color"][:3]]
-        swatch.setStyleSheet(
-            f"background: rgb({r},{g},{b}); border: 1px solid {COLORS['swatch_border']};"
-            f" border-radius: 3px;"
-        )
-        header_layout.addWidget(swatch)
+        # Color swatch — clickable to open color picker
+        self._swatch = _ClickableLabel()
+        self._swatch.setFixedSize(16, 12)
+        self._swatch.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._swatch.setToolTip("Click to change annotation color")
+        self._swatch.clicked.connect(self._on_swatch_clicked)
+        self._update_swatch()
+        header_layout.addWidget(self._swatch)
 
         # Expand arrow + name with count
         bboxes = group.get("bboxes", [])
@@ -298,7 +298,7 @@ class AnnotationRowWidget(QFrame):
     def _build_children(self):
         """Lazily create per-bbox child checkboxes."""
         bboxes = self.group.get("bboxes", [])
-        gaps = self.group.get("gaps", [])
+        gaps = self.group.get("measurements", [])
         for i, bbox in enumerate(bboxes):
             row = QFrame()
             row.setFrameShape(QFrame.Shape.NoFrame)
@@ -329,7 +329,7 @@ class AnnotationRowWidget(QFrame):
         """Toggle all bboxes + gaps in the group."""
         for bbox in self.group.get("bboxes", []):
             bbox.visible = checked
-        for gap in self.group.get("gaps", []):
+        for gap in self.group.get("measurements", []):
             gap.visible = checked
         # Sync child checkboxes
         for cb in self._child_checkboxes:
@@ -349,6 +349,50 @@ class AnnotationRowWidget(QFrame):
                 else:
                     # Shared gap (neighbor/spine): visible if any parent is visible
                     gap.visible = any(b.visible for b in gap.parent_bboxes)
+        self.visibility_changed.emit()
+
+    def _update_swatch(self):
+        """Update swatch color from group color."""
+        r, g, b = [int(c * 255) for c in self.group["color"][:3]]
+        self._swatch.setStyleSheet(
+            f"background: rgb({r},{g},{b}); border: 1px solid {COLORS['swatch_border']};"
+            f" border-radius: 3px;"
+        )
+
+    @staticmethod
+    def _contrasting_color(r, g, b):
+        """Compute a high-contrast measurement color for a given bbox color.
+
+        Rotates hue by 180° (complementary) and boosts saturation/value.
+        """
+        from colorsys import rgb_to_hsv, hsv_to_rgb
+        h, s, v = rgb_to_hsv(r, g, b)
+        h = (h + 0.5) % 1.0       # complementary hue
+        s = max(s, 0.7)            # ensure saturated
+        v = max(v, 0.8)            # ensure bright
+        return hsv_to_rgb(h, s, v)
+
+    def _on_swatch_clicked(self):
+        """Open color picker and apply to all bboxes + measurement gaps.
+
+        Wall distance measurements keep their color — only dimension
+        and neighbor measurements get the contrasting color.
+        """
+        from PySide6.QtWidgets import QColorDialog
+        r, g, b = [int(c * 255) for c in self.group["color"][:3]]
+        color = QColorDialog.getColor(QColor(r, g, b), self, "Annotation Color")
+        if not color.isValid():
+            return
+        new_color = [color.redF(), color.greenF(), color.blueF()]
+        gap_color = self._contrasting_color(*new_color)
+        self.group["color"] = new_color
+        for bbox in self.group.get("bboxes", []):
+            bbox.color = list(new_color)
+        for gap in self.group.get("measurements", []):
+            if gap.measurement_type == MeasurementType.WALL_DISTANCE:
+                continue
+            gap.color = tuple(gap_color)
+        self._update_swatch()
         self.visibility_changed.emit()
 
 

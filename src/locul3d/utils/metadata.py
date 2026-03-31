@@ -6,7 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..core.geometry import AnnotationCategory, BBoxItem, GapItem
+from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, MeasurementType
 
 try:
     import yaml
@@ -146,6 +146,7 @@ class MetadataHandler(ABC):
                 color=self.gap_color,
                 category=self.category,
             )
+            neighbor_gap.measurement_type = MeasurementType.NEIGHBOR
             neighbor_gap.parent_bboxes = [
                 b for b in [idx_to_bbox.get(a_idx), idx_to_bbox.get(b_idx)] if b]
             gaps.append(neighbor_gap)
@@ -211,6 +212,7 @@ class MetadataHandler(ABC):
                 color=self.gap_color,
                 category=self.category,
             )
+            width_gap.measurement_type = MeasurementType.DIMENSION
             owner = idx_to_bbox.get(idx)
             if owner:
                 width_gap.parent_bboxes = [owner]
@@ -275,6 +277,7 @@ class MetadataHandler(ABC):
                     category=self.category,
                     label_t=0.05,
                 )
+                wall_gap.measurement_type = MeasurementType.WALL_DISTANCE
                 owner = idx_to_bbox.get(idx)
                 if owner:
                     wall_gap.parent_bboxes = [owner]
@@ -301,6 +304,7 @@ class MetadataHandler(ABC):
                 color=self.wall_dist_color,
                 category=self.category,
             )
+            spine.measurement_type = MeasurementType.WALL_DISTANCE
             spine.parent_bboxes = [
                 b for b in [idx_to_bbox.get(idx) for idx, _, _, _ in with_wall] if b]
             gaps.append(spine)

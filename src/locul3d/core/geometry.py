@@ -6,6 +6,13 @@ import numpy as np
 from typing import Optional
 
 
+class MeasurementType(enum.Enum):
+    """Type of gap measurement annotation."""
+    NEIGHBOR = "neighbor"
+    DIMENSION = "dimension"
+    WALL_DISTANCE = "wall_dist"
+
+
 class AnnotationCategory(enum.Enum):
     """Pipeline annotation category for grouping bboxes and gaps."""
     RACK = "rack"
@@ -33,6 +40,7 @@ class GapItem:
                                dtype=np.float64)
         self.gap_mm = float(gap_mm) if gap_mm is not None else None
         self.parent_bboxes = []  # owning BBoxItem(s) for per-item toggle
+        self.measurement_type = None  # MeasurementType enum value
         self.axis = int(axis)  # 0=X, 1=Y corridor axis
         self.visible = visible
         # Where ticks connect to the bbox face

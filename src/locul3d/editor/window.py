@@ -750,7 +750,7 @@ class EditorWindow(QMainWindow):
         self._detect_metadata(folder_path, append=True)
         n_groups = len(self.layer_panel.annotation_groups)
         if n_groups:
-            n_items = sum(len(g["bboxes"]) + len(g["gaps"]) for g in self.layer_panel.annotation_groups)
+            n_items = sum(len(g["bboxes"]) + len(g["measurements"]) for g in self.layer_panel.annotation_groups)
             self.status_label.setText(
                 f"Loaded metadata: {n_groups} group(s), {n_items} items from {folder_path.name}")
         else:
@@ -789,7 +789,7 @@ class EditorWindow(QMainWindow):
                 "name": handler.display_name,
                 "color": bboxes[0].color if bboxes else gaps[0].color,
                 "bboxes": list(bboxes),
-                "gaps": list(gaps),
+                "measurements": list(gaps),
             })
 
         if not new_bboxes and not new_gaps:
@@ -860,11 +860,11 @@ class EditorWindow(QMainWindow):
             if rack_bboxes or rack_gaps:
                 groups.append({"name": "Racks",
                                "color": (rack_bboxes or rack_gaps)[0].color,
-                               "bboxes": rack_bboxes, "gaps": rack_gaps})
+                               "bboxes": rack_bboxes, "measurements": rack_gaps})
             if es_bboxes or es_gaps:
                 groups.append({"name": "Empty Spaces",
                                "color": (es_bboxes or es_gaps)[0].color,
-                               "bboxes": es_bboxes, "gaps": es_gaps})
+                               "bboxes": es_bboxes, "measurements": es_gaps})
             self.layer_panel.annotation_groups = groups
             self.layer_panel.rebuild()
 
