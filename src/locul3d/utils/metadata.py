@@ -2,8 +2,9 @@
 
 import re
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from ..core.geometry import AnnotationCategory, BBoxItem, GapItem
 
@@ -15,10 +16,30 @@ except ImportError:
     _HAS_YAML = False
 
 
-class MetadataHandler(ABC):
-    """Base class for auto-detecting and parsing *_metadata.yaml files."""
+def load_all_metadata(directory: Path) -> Dict[str, dict]:
+    """Read all *_metadata.yaml files, group by 'kind' field.
 
-    file_pattern: str  # glob pattern, e.g. "rack_*_metadata.yaml"
+    Returns {kind_str: {sequential_idx: data_dict, ...}, ...}.
+    Files without a 'kind' field are grouped under 'unknown'.
+    """
+    if not _HAS_YAML:
+        return {}
+    groups = defaultdict(dict)
+    for path in sorted(directory.glob("*_metadata.yaml")):
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        if data is None:
+            continue
+        kind = data.get("kind", "unknown")
+        idx = len(groups[kind])
+        groups[kind][idx] = data
+    return dict(groups)
+
+
+class MetadataHandler(ABC):
+    """Base class for parsing metadata items into bbox + gap annotations."""
+
+    kind: str  # YAML 'kind' field value, e.g. "rack", "mts", "region_subzone"
     category: AnnotationCategory
     display_name: str  # shown in Annotations panel, e.g. "Racks"
     bbox_color: tuple  # RGB 0-1
@@ -27,48 +48,19 @@ class MetadataHandler(ABC):
     use_item_z: bool = False  # True = annotations at item Z; False = at Z=0
     skip_neighbor_gaps: bool = False  # True = don't compute neighbor pairs
 
-    def detect(self, directory: Path) -> bool:
-        """Return True if this handler's metadata files exist in directory."""
-        return any(directory.glob(self.file_pattern))
-
     # Cross-axis offset from rack inner face (meters)
     _WIDTH_OFFSET = 0.10      # tier 1: width brackets
     _WALL_DIST_OFFSET = 0.22  # tier 2: wall distance brackets
     wall_dist_color: tuple = (1.0, 0.2, 0.2)  # red
 
     def parse(
-        self, directory: Path
+        self, items: dict
     ) -> Tuple[List[BBoxItem], List[GapItem]]:
-        """Parse metadata files → (bboxes, gaps).
+        """Parse pre-loaded metadata items → (bboxes, gaps).
 
-        Supports two metadata formats:
-          - Legacy: has "index", "length_mm", "neighbor_left"/"neighbor_right"
-                    dicts, "distance_to_high_wall_mm", "wall_high"
-          - Current: index in filename, "width_mm", "neighbor_left_mm"/
-                     "neighbor_right_mm" scalars, "distance_wall_a_mm"/
-                     "distance_wall_b_mm"
+        Args:
+            items: {idx: data_dict, ...} — already grouped by kind.
         """
-        if not _HAS_YAML:
-            return [], []
-
-        # Load all metadata files
-        items = {}
-        for path in sorted(directory.glob(self.file_pattern)):
-            with open(path) as f:
-                data = yaml.safe_load(f)
-            if data is None:
-                continue
-            # Extract index: from data or from filename
-            if "index" in data:
-                idx = data["index"]
-            else:
-                # Match all digits between last prefix and _metadata,
-                # e.g. "rack_3_metadata" → "3", "mts_box_10_2_metadata" → "10_2"
-                stem = path.stem.removesuffix("_metadata")
-                # Use sequential index keyed on filename for uniqueness
-                idx = len(items)
-            items[idx] = data
-
         if not items:
             return [], []
 
@@ -83,7 +75,7 @@ class MetadataHandler(ABC):
         for idx in sorted_indices:
             r = items[idx]
             bbox = BBoxItem(
-                label=self.category.value,
+                label=r.get("id", self.category.value),
                 center=r["center"],
                 size=r["size"],
                 color=list(self.bbox_color),
@@ -147,13 +139,16 @@ class MetadataHandler(ABC):
                 anchor_a = [a_right, cross, a_top_z]
                 anchor_b = [b_left, cross, b_top_z]
 
-            gaps.append(GapItem(
+            neighbor_gap = GapItem(
                 edge_a, edge_b, gap_mm, axis, True,
                 anchor_a=anchor_a, anchor_b=anchor_b,
                 tick_dir=[0, 0, 0.03],
                 color=self.gap_color,
                 category=self.category,
-            ))
+            )
+            neighbor_gap.parent_bboxes = [
+                b for b in [idx_to_bbox.get(a_idx), idx_to_bbox.get(b_idx)] if b]
+            gaps.append(neighbor_gap)
 
         # Build width annotations at Z=0, offset into corridor
         # Cluster racks by cross-axis position to detect row sides
@@ -216,7 +211,9 @@ class MetadataHandler(ABC):
                 color=self.gap_color,
                 category=self.category,
             )
-            width_gap.parent_bbox = idx_to_bbox.get(idx)
+            owner = idx_to_bbox.get(idx)
+            if owner:
+                width_gap.parent_bboxes = [owner]
             gaps.append(width_gap)
 
         # Build wall distance annotations at Z=0, staggered per row
@@ -278,7 +275,9 @@ class MetadataHandler(ABC):
                     category=self.category,
                     label_t=0.05,
                 )
-                wall_gap.parent_bbox = idx_to_bbox.get(idx)
+                owner = idx_to_bbox.get(idx)
+                if owner:
+                    wall_gap.parent_bboxes = [owner]
                 gaps.append(wall_gap)
 
             # Spine at wall_high connecting all bracket tips
@@ -295,13 +294,16 @@ class MetadataHandler(ABC):
             else:
                 spine_a = [wall_high, inner_cross, spine_z]
                 spine_b = [wall_high, outer_cross, spine_z]
-            gaps.append(GapItem(
+            spine = GapItem(
                 spine_a, spine_b, None, cross_axis, True,
                 anchor_a=spine_a, anchor_b=spine_b,
                 tick_dir=[0, 0, 0],
                 color=self.wall_dist_color,
                 category=self.category,
-            ))
+            )
+            spine.parent_bboxes = [
+                b for b in [idx_to_bbox.get(idx) for idx, _, _, _ in with_wall] if b]
+            gaps.append(spine)
 
         return bboxes, gaps
 
@@ -395,9 +397,7 @@ def _get_wall_distance(rack_data, axis):
 
 
 class RackMetadataHandler(MetadataHandler):
-    """Parse rack_N_metadata.yaml files into bbox + gap annotations."""
-
-    file_pattern = "rack_*_metadata.yaml"
+    kind = "rack"
     category = AnnotationCategory.RACK
     display_name = "Racks"
     bbox_color = (1.0, 0.5, 0.0)       # orange
@@ -406,9 +406,7 @@ class RackMetadataHandler(MetadataHandler):
 
 
 class EmptySpaceMetadataHandler(MetadataHandler):
-    """Parse empty_N_metadata.yaml files into bbox + gap annotations."""
-
-    file_pattern = "empty_*_metadata.yaml"
+    kind = "empty_space"
     category = AnnotationCategory.EMPTY_SPACE
     display_name = "Empty Spaces"
     bbox_color = (0.2, 0.4, 1.0)       # blue
@@ -416,10 +414,18 @@ class EmptySpaceMetadataHandler(MetadataHandler):
     neighbor_index_key = "empty_index"
 
 
-class MtsMetadataHandler(MetadataHandler):
-    """Parse mts_stack_N_metadata.yaml files into bbox + gap annotations."""
+class RackRegionMetadataHandler(MetadataHandler):
+    kind = "region_subzone"
+    category = AnnotationCategory.REGION_SUBZONE
+    display_name = "Rack Regions"
+    bbox_color = (0.5, 0.5, 0.5)       # grey (matches metadata color)
+    gap_color = (0.4, 0.4, 0.4)
+    neighbor_index_key = "region_index"
+    skip_neighbor_gaps = True
 
-    file_pattern = "mts_stack_*_metadata.yaml"
+
+class MtsMetadataHandler(MetadataHandler):
+    kind = "mts_stack"
     category = AnnotationCategory.MTS
     display_name = "MTS Stacks"
     bbox_color = (1.0, 0.8, 0.2)       # yellow
@@ -429,14 +435,7 @@ class MtsMetadataHandler(MetadataHandler):
 
 
 class MtsBoxMetadataHandler(MetadataHandler):
-    """Parse mts_box_N_M_metadata.yaml files into bbox + gap annotations.
-
-    MTS boxes are vertically stacked (Z-axis neighbors) with no wall distances.
-    Only bboxes and width annotations are produced; vertical neighbor gaps
-    are skipped since the bracket renderer works in X/Y.
-    """
-
-    file_pattern = "mts_box_*_metadata.yaml"
+    kind = "mts_box"
     category = AnnotationCategory.MTS_BOX
     display_name = "MTS Boxes"
     bbox_color = (0.2, 0.8, 1.0)       # cyan (matches metadata color)
@@ -444,3 +443,13 @@ class MtsBoxMetadataHandler(MetadataHandler):
     neighbor_index_key = "mts_box_index"
     use_item_z = True
     skip_neighbor_gaps = True  # neighbors are vertical (Z-axis)
+
+
+# Registry: kind → handler instance
+METADATA_HANDLERS = {h.kind: h for h in [
+    RackMetadataHandler(),
+    EmptySpaceMetadataHandler(),
+    RackRegionMetadataHandler(),
+    MtsMetadataHandler(),
+    MtsBoxMetadataHandler(),
+]}

@@ -312,7 +312,7 @@ class AnnotationRowWidget(QFrame):
             cb.toggled.connect(lambda checked, b=bbox, g=gaps: self._on_item_visibility(checked, b, g))
             row_layout.addWidget(cb)
 
-            name = f"{bbox.label}_{i}" if len(bboxes) > 1 else bbox.label
+            name = bbox.label
             lbl = QLabel(name)
             lbl.setMinimumWidth(40)
             lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -342,8 +342,13 @@ class AnnotationRowWidget(QFrame):
         """Toggle a single bbox and its owned measurements."""
         bbox.visible = checked
         for gap in gaps:
-            if gap.parent_bbox is bbox:
-                gap.visible = checked
+            if bbox in gap.parent_bboxes:
+                if len(gap.parent_bboxes) == 1:
+                    # Owned gap (width/wall): follows its single parent
+                    gap.visible = checked
+                else:
+                    # Shared gap (neighbor/spine): visible if any parent is visible
+                    gap.visible = any(b.visible for b in gap.parent_bboxes)
         self.visibility_changed.emit()
 
 

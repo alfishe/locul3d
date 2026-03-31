@@ -10,8 +10,9 @@ class AnnotationCategory(enum.Enum):
     """Pipeline annotation category for grouping bboxes and gaps."""
     RACK = "rack"
     EMPTY_SPACE = "empty_space"
-    MTS = "mts"
+    MTS = "mts_stack"
     MTS_BOX = "mts_box"
+    REGION_SUBZONE = "region_subzone"
 
 
 class GapItem:
@@ -31,7 +32,7 @@ class GapItem:
         self.edge_b = np.array(edge_b if edge_b is not None else [0, 0, 0],
                                dtype=np.float64)
         self.gap_mm = float(gap_mm) if gap_mm is not None else None
-        self.parent_bbox = None  # owning BBoxItem (for per-item toggle)
+        self.parent_bboxes = []  # owning BBoxItem(s) for per-item toggle
         self.axis = int(axis)  # 0=X, 1=Y corridor axis
         self.visible = visible
         # Where ticks connect to the bbox face

@@ -28,7 +28,7 @@ from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
 from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, PlaneItem
-from ..utils.metadata import RackMetadataHandler, EmptySpaceMetadataHandler, MtsMetadataHandler, MtsBoxMetadataHandler
+from ..utils.metadata import load_all_metadata, METADATA_HANDLERS
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -759,6 +759,8 @@ class EditorWindow(QMainWindow):
     def _detect_metadata(self, folder_path: Path, append: bool = False):
         """Auto-detect and load metadata files from a folder.
 
+        Reads all *_metadata.yaml, groups by 'kind', dispatches to handlers.
+
         Args:
             append: If True, add to existing annotations. If False, replace them.
         """
@@ -766,11 +768,13 @@ class EditorWindow(QMainWindow):
         new_gaps = []
         new_groups = []
 
-        for handler in self._metadata_handlers:
-            if not handler.detect(folder_path):
+        kind_groups = load_all_metadata(folder_path)
+        for kind, items in kind_groups.items():
+            handler = METADATA_HANDLERS.get(kind)
+            if handler is None:
                 continue
             try:
-                bboxes, gaps = handler.parse(folder_path)
+                bboxes, gaps = handler.parse(items)
             except Exception:
                 continue
             if not bboxes and not gaps:
@@ -878,7 +882,6 @@ class EditorWindow(QMainWindow):
     _RACK_GAP_ANNOT = (0.0, 0.85, 0.85)  # cyan — contrasts orange
     _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
 
-    _metadata_handlers = [RackMetadataHandler(), EmptySpaceMetadataHandler(), MtsMetadataHandler(), MtsBoxMetadataHandler()]
 
     def _parse_pipeline_context(self, data):
         """Parse pipeline_context.yaml → (list[BBoxItem], list[GapItem]).
