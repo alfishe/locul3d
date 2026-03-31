@@ -166,7 +166,8 @@ class MetadataHandler(ABC):
             [(r["center"][cross_axis], idx) for idx, r in items.items()])
         rows = _cluster_cross_rows(cross_positions)
 
-        # For each row, determine inward direction (toward nearest other row)
+        # Determine cross-axis direction per item from side_from_wall_b,
+        # falling back to nearest-row heuristic for legacy data.
         row_means = [sum(x for x, _ in row) / len(row) for row in rows]
         row_directions = {}  # idx → cross_sign
         for ri, row in enumerate(rows):
@@ -174,11 +175,17 @@ class MetadataHandler(ABC):
             others = [m for i, m in enumerate(row_means) if i != ri]
             if others:
                 nearest = min(others, key=lambda m: abs(m - mean))
-                sign = 1 if mean < nearest else -1
+                fallback_sign = 1 if mean < nearest else -1
             else:
-                sign = 1  # single row, default right
+                fallback_sign = 1
             for _, idx in row:
-                row_directions[idx] = sign
+                side_str = items[idx].get("side_from_wall_b", "")
+                if side_str == "right":
+                    row_directions[idx] = 1
+                elif side_str == "left":
+                    row_directions[idx] = -1
+                else:
+                    row_directions[idx] = fallback_sign
 
         for idx in sorted(items):
             if MeasurementType.DIMENSION not in self.enabled_measurements:
@@ -253,19 +260,21 @@ class MetadataHandler(ABC):
             with_wall.sort(key=lambda x: x[2])
 
             wall_high = with_wall[0][3]
-            cross_sign = row_directions.get(with_wall[0][0], 1)
             row_cross = sum(r["center"][cross_axis] for _, r, _, _ in with_wall) / len(with_wall)
             mean_half = sum(r["size"][cross_axis] / 2 for _, r, _, _ in with_wall) / len(with_wall)
-            row_inner = row_cross + cross_sign * mean_half
+
+            # Same direction as dimension brackets (from side_from_wall_b)
+            wall_side_sign = row_directions.get(with_wall[0][0], 1)
+            row_wall_face = row_cross + wall_side_sign * mean_half
 
             if self.wall_dist_style == WallDistStyle.COMB:
                 gaps.extend(self._build_wall_dist_comb(
                     with_wall, idx_to_bbox, axis, cross_axis,
-                    cross_sign, row_inner, wall_high))
+                    wall_side_sign, row_wall_face, wall_high))
             else:
                 gaps.extend(self._build_wall_dist_staggered(
                     with_wall, idx_to_bbox, axis, cross_axis,
-                    cross_sign, row_inner, wall_high))
+                    wall_side_sign, row_wall_face, wall_high))
 
         return bboxes, gaps
 

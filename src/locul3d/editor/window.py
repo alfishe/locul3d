@@ -782,7 +782,7 @@ class EditorWindow(QMainWindow):
 
             for bbox in bboxes:
                 bbox.scene_coords = True
-            new_bboxes.extend(bboxes)
+            # Bboxes kept in groups for per-item toggles but not rendered
             new_gaps.extend(gaps)
 
             new_groups.append({
