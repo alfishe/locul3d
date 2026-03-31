@@ -79,6 +79,8 @@ async def _clear(request: web.Request) -> web.Response:
 
     def _do_clear():
         dispatcher._layer_manager.clear()
+        dispatcher._dynamic_layers.clear()
+        dispatcher._rebuild_layer_panel()
         dispatcher._viewport.update()
         return {"status": "ok"}
 

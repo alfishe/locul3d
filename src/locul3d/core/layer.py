@@ -473,6 +473,27 @@ class LayerManager:
         radius = float(np.linalg.norm(global_max - global_min) / 2.0)
         return center, max(radius, 1.0)
 
+    def get_layer(self, layer_id: str) -> Optional[LayerData]:
+        """Find a layer by its ID, or return None."""
+        for layer in self.layers:
+            if layer.id == layer_id:
+                return layer
+        return None
+
+    def remove_layer(self, layer_id: str) -> bool:
+        """Remove a layer by ID. Returns True if found and removed."""
+        for i, layer in enumerate(self.layers):
+            if layer.id == layer_id:
+                self.layers.pop(i)
+                self.invalidate_scene_aabb()
+                return True
+        return False
+
+    def clear(self) -> None:
+        """Remove all layers and reset cached state."""
+        self.layers.clear()
+        self.invalidate_scene_aabb()
+
     def visible_layers(self) -> list[LayerData]:
         return [l for l in self.layers if l.visible and l.loaded and not l.load_error]
 

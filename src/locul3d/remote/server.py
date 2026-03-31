@@ -80,6 +80,7 @@ class RemoteServer:
             self._loop.close()
 
     async def _serve(self) -> None:
+        self._dispatcher.set_event_loop(asyncio.get_event_loop())
         app = self._create_app()
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -104,12 +105,14 @@ class RemoteServer:
 
         # ── REST routes ───────────────────────────────────────────────
 
-        from .handlers import system, camera, scene, viewport
+        from .handlers import system, camera, scene, viewport, dynamic, shapes
 
         system.setup_routes(app, self._dispatcher)
         camera.setup_routes(app, self._dispatcher)
         scene.setup_routes(app, self._dispatcher)
         viewport.setup_routes(app, self._dispatcher)
+        dynamic.setup_routes(app, self._dispatcher)
+        shapes.setup_routes(app, self._dispatcher)
 
         # ── WebSocket ─────────────────────────────────────────────────
 
@@ -173,8 +176,21 @@ class RemoteServer:
                         await ws.send_json(response)
 
                 elif msg.type == web.WSMsgType.BINARY:
-                    # Binary point streaming — Phase 3
-                    log.debug("Binary WS message received (%d bytes)", len(msg.data))
+                    try:
+                        result = await dispatcher.handle_ws_binary(msg.data)
+                        if result:
+                            await ws.send_json({
+                                "type": "result",
+                                "status": "ok",
+                                "data": result,
+                            })
+                    except Exception as exc:
+                        log.exception("Binary WS message failed")
+                        await ws.send_json({
+                            "type": "error",
+                            "code": "BINARY_ERROR",
+                            "message": str(exc),
+                        })
 
         finally:
             dispatcher.unregister_ws(ws)

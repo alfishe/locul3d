@@ -551,6 +551,11 @@ class BaseGLViewport(QOpenGLWidget):
             glColor4f(r, g, b, layer.opacity)
         elif layer.colors is not None or getattr(layer, 'colors_u8', None) is not None:
             has_vtx_colors = True
+        elif layer.color is not None:
+            # Fallback: use layer color even when use_layer_colors is off
+            # (e.g. dynamic layers with no per-vertex colors)
+            r, g, b = layer.color[:3]
+            glColor4f(r, g, b, layer.opacity)
         else:
             glColor4f(0.7, 0.7, 0.8, layer.opacity)
 
@@ -659,6 +664,9 @@ class BaseGLViewport(QOpenGLWidget):
             glColor4f(r, g, b, layer.opacity)
         elif layer.colors is not None or getattr(layer, 'colors_u8', None) is not None:
             has_vtx_colors = True
+        elif layer.color is not None:
+            r, g, b = layer.color[:3]
+            glColor4f(r, g, b, layer.opacity)
         else:
             glColor4f(0.6, 0.65, 0.7, layer.opacity)
 

@@ -321,6 +321,31 @@ class BBoxCreate(BaseModel):
     fill_opacity: float = 0.0
 
 
+class BBoxUpdate(BaseModel):
+    """Update an editor annotation bbox (all fields optional)."""
+
+    label: Optional[str] = None
+    center: Optional[List[float]] = Field(None, min_length=3, max_length=3)
+    size: Optional[List[float]] = Field(None, min_length=3, max_length=3)
+    color: Optional[List[float]] = Field(None, min_length=3, max_length=3)
+    rotation_z: Optional[float] = None
+    fill_opacity: Optional[float] = None
+
+
+class PlaneCreate(BaseModel):
+    """Create an editor annotation plane."""
+
+    axis: str = "xy"  # "xy", "xz", "yz"
+    center: List[float] = Field(
+        default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3
+    )
+    size: List[float] = Field(
+        default_factory=lambda: [10.0, 10.0], min_length=2, max_length=2
+    )
+    color: Optional[List[float]] = Field(None, min_length=3, max_length=3)
+    opacity: float = 0.3
+
+
 # ── Viewport ──────────────────────────────────────────────────────────
 
 
