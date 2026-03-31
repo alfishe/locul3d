@@ -46,7 +46,12 @@ class MetadataHandler(ABC):
     gap_color: tuple  # RGB 0-1
     neighbor_index_key: str  # key in neighbor dict, e.g. "rack_index"
     use_item_z: bool = False  # True = annotations at item Z; False = at Z=0
-    skip_neighbor_gaps: bool = False  # True = don't compute neighbor pairs
+    # Which measurement types to generate (empty set = bboxes only)
+    enabled_measurements: frozenset = frozenset({
+        MeasurementType.DIMENSION,
+        MeasurementType.NEIGHBOR,
+        MeasurementType.WALL_DISTANCE,
+    })
 
     # Cross-axis offset from rack inner face (meters)
     _WIDTH_OFFSET = 0.10      # tier 1: width brackets
@@ -83,13 +88,16 @@ class MetadataHandler(ABC):
             bboxes.append(bbox)
             idx_to_bbox[idx] = bbox
 
+        if not self.enabled_measurements:
+            return bboxes, []
+
         # Detect corridor axis
         axis = _detect_corridor_axis_from_spread(items)
         cross_axis = 1 - axis
 
         # Build neighbor gap pairs
         pairs = {}  # (min_idx, max_idx) → gap_mm
-        if self.skip_neighbor_gaps:
+        if MeasurementType.NEIGHBOR not in self.enabled_measurements:
             pass
         elif new_format:
             pairs = _compute_neighbor_pairs_from_scalars(items, axis)
@@ -151,7 +159,7 @@ class MetadataHandler(ABC):
                 b for b in [idx_to_bbox.get(a_idx), idx_to_bbox.get(b_idx)] if b]
             gaps.append(neighbor_gap)
 
-        # Build width annotations at Z=0, offset into corridor
+        # Build dimension annotations at Z=0, offset into corridor
         # Cluster racks by cross-axis position to detect row sides
         cross_positions = sorted(
             [(r["center"][cross_axis], idx) for idx, r in items.items()])
@@ -172,6 +180,8 @@ class MetadataHandler(ABC):
                 row_directions[idx] = sign
 
         for idx in sorted(items):
+            if MeasurementType.DIMENSION not in self.enabled_measurements:
+                break
             r = items[idx]
             # Support both "length_mm" (legacy) and "width_mm" (current)
             length_mm = r.get("length_mm") or r.get("width_mm")
@@ -217,6 +227,9 @@ class MetadataHandler(ABC):
             if owner:
                 width_gap.parent_bboxes = [owner]
             gaps.append(width_gap)
+
+        if MeasurementType.WALL_DISTANCE not in self.enabled_measurements:
+            return bboxes, gaps
 
         # Build wall distance annotations at Z=0, staggered per row
         # Group racks by row for shared spine
@@ -422,10 +435,10 @@ class RackRegionMetadataHandler(MetadataHandler):
     kind = "region_subzone"
     category = AnnotationCategory.REGION_SUBZONE
     display_name = "Rack Regions"
-    bbox_color = (0.5, 0.5, 0.5)       # grey (matches metadata color)
+    bbox_color = (0.5, 0.5, 0.5)       # grey
     gap_color = (0.4, 0.4, 0.4)
     neighbor_index_key = "region_index"
-    skip_neighbor_gaps = True
+    enabled_measurements = frozenset()  # bboxes only
 
 
 class MtsMetadataHandler(MetadataHandler):
@@ -435,18 +448,21 @@ class MtsMetadataHandler(MetadataHandler):
     bbox_color = (1.0, 0.8, 0.2)       # yellow
     gap_color = (0.9, 0.6, 0.1)        # darker gold
     neighbor_index_key = "mts_index"
-    use_item_z = True
+    enabled_measurements = frozenset({
+        MeasurementType.NEIGHBOR,
+        MeasurementType.WALL_DISTANCE,
+    })
 
 
 class MtsBoxMetadataHandler(MetadataHandler):
     kind = "mts_box"
     category = AnnotationCategory.MTS_BOX
     display_name = "MTS Boxes"
-    bbox_color = (0.2, 0.8, 1.0)       # cyan (matches metadata color)
+    bbox_color = (0.2, 0.8, 1.0)       # cyan
     gap_color = (0.1, 0.6, 0.9)        # darker cyan
     neighbor_index_key = "mts_box_index"
     use_item_z = True
-    skip_neighbor_gaps = True  # neighbors are vertical (Z-axis)
+    enabled_measurements = frozenset({MeasurementType.DIMENSION})
 
 
 # Registry: kind → handler instance
@@ -454,6 +470,6 @@ METADATA_HANDLERS = {h.kind: h for h in [
     RackMetadataHandler(),
     EmptySpaceMetadataHandler(),
     RackRegionMetadataHandler(),
-    # MtsMetadataHandler(),      # TODO: re-enable when MTS column handling is ready
-    # MtsBoxMetadataHandler(),   # TODO: re-enable when MTS box handling is ready
+    MtsMetadataHandler(),
+    MtsBoxMetadataHandler(),
 ]}
