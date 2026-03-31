@@ -76,16 +76,20 @@ class MetadataHandler(ABC):
         sample = next(iter(items.values()))
         new_format = "width_mm" in sample and "index" not in sample
 
-        # Create BBoxItems
+        # Create BBoxItems (one per metadata file, sorted by index)
         bboxes = []
-        for idx in sorted(items):
+        sorted_indices = sorted(items)
+        idx_to_bbox = {}  # item index → BBoxItem for gap linkage
+        for idx in sorted_indices:
             r = items[idx]
-            bboxes.append(BBoxItem(
+            bbox = BBoxItem(
                 label=self.category.value,
                 center=r["center"],
                 size=r["size"],
                 color=list(self.bbox_color),
-            ))
+            )
+            bboxes.append(bbox)
+            idx_to_bbox[idx] = bbox
 
         # Detect corridor axis
         axis = _detect_corridor_axis_from_spread(items)
@@ -205,13 +209,15 @@ class MetadataHandler(ABC):
                 anchor_b = [rack_right, rack_inner, ann_z]
                 tick_dir = [0, cross_sign * 0.03, 0]
 
-            gaps.append(GapItem(
+            width_gap = GapItem(
                 edge_a, edge_b, length_mm, axis, True,
                 anchor_a=anchor_a, anchor_b=anchor_b,
                 tick_dir=tick_dir,
                 color=self.gap_color,
                 category=self.category,
-            ))
+            )
+            width_gap.parent_bbox = idx_to_bbox.get(idx)
+            gaps.append(width_gap)
 
         # Build wall distance annotations at Z=0, staggered per row
         # Group racks by row for shared spine
@@ -264,14 +270,16 @@ class MetadataHandler(ABC):
                     anchor_b = [wall_high, bracket_cross, ann_z]
                     tick_dir = [0, cross_sign * 0.03, 0]
 
-                gaps.append(GapItem(
+                wall_gap = GapItem(
                     edge_a, edge_b, wall_dist, axis, True,
                     anchor_a=anchor_a, anchor_b=anchor_b,
                     tick_dir=tick_dir,
                     color=self.wall_dist_color,
                     category=self.category,
                     label_t=0.05,
-                ))
+                )
+                wall_gap.parent_bbox = idx_to_bbox.get(idx)
+                gaps.append(wall_gap)
 
             # Spine at wall_high connecting all bracket tips
             n = len(with_wall)

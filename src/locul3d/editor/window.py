@@ -750,7 +750,7 @@ class EditorWindow(QMainWindow):
         self._detect_metadata(folder_path, append=True)
         n_groups = len(self.layer_panel.annotation_groups)
         if n_groups:
-            n_items = sum(len(g["items"]) for g in self.layer_panel.annotation_groups)
+            n_items = sum(len(g["bboxes"]) + len(g["gaps"]) for g in self.layer_panel.annotation_groups)
             self.status_label.setText(
                 f"Loaded metadata: {n_groups} group(s), {n_items} items from {folder_path.name}")
         else:
@@ -781,11 +781,11 @@ class EditorWindow(QMainWindow):
             new_bboxes.extend(bboxes)
             new_gaps.extend(gaps)
 
-            items = list(bboxes) + list(gaps)
             new_groups.append({
                 "name": handler.display_name,
-                "color": items[0].color,
-                "items": items,
+                "color": bboxes[0].color if bboxes else gaps[0].color,
+                "bboxes": list(bboxes),
+                "gaps": list(gaps),
             })
 
         if not new_bboxes and not new_gaps:
@@ -854,13 +854,13 @@ class EditorWindow(QMainWindow):
             es_gaps = [g for g in gaps if g.category is AnnotationCategory.EMPTY_SPACE]
             groups = []
             if rack_bboxes or rack_gaps:
-                items = rack_bboxes + rack_gaps
-                groups.append({"name": "Racks", "color": items[0].color,
-                               "items": items})
+                groups.append({"name": "Racks",
+                               "color": (rack_bboxes or rack_gaps)[0].color,
+                               "bboxes": rack_bboxes, "gaps": rack_gaps})
             if es_bboxes or es_gaps:
-                items = es_bboxes + es_gaps
-                groups.append({"name": "Empty Spaces", "color": items[0].color,
-                               "items": items})
+                groups.append({"name": "Empty Spaces",
+                               "color": (es_bboxes or es_gaps)[0].color,
+                               "bboxes": es_bboxes, "gaps": es_gaps})
             self.layer_panel.annotation_groups = groups
             self.layer_panel.rebuild()
 
