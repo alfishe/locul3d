@@ -42,7 +42,10 @@ class RemoteServer:
         try:
             from locul3d.animation import create_engine
 
-            engine = create_engine(self._dispatcher._viewport)
+            engine = create_engine(
+                self._dispatcher._viewport,
+                dispatcher=self._dispatcher,
+            )
             self._dispatcher.set_animation_engine(engine)
         except ImportError:
             log.debug("Animation package not available — animation commands disabled")

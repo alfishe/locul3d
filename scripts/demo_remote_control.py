@@ -223,54 +223,51 @@ def demo_ws_animation(ws):
             color=[1.0, 0.3, 0.1],
             opacity=0.9)
 
-    # Try animation — if engine not available, do manual animation
+    # Camera orbit via continuous transform
     print("  Starting 15 deg/sec camera orbit...")
-    result = ws_send(ws, "camera.transform_continuous",
-                     id="demo-orbit", property="azimuth", rate=15.0, duration_ms=0)
-    if "error" in str(result).lower() or "not available" in str(result).lower():
-        has_animation = False
-        print("  Animation engine not available — doing manual camera orbit instead")
+    ws_send(ws, "camera.transform_continuous",
+            id="demo-orbit", property="azimuth", rate=15.0, duration_ms=0)
 
-        # Manual orbit: spin camera with WS camera.set commands
-        for i in range(80):  # ~4 seconds at 20 fps
-            azimuth = (i * 4.5) % 360
-            ws_send(ws, "camera.set", azimuth=azimuth, elevation=30 + 10 * math.sin(i * 0.1))
-            time.sleep(0.05)
+    # Keyframed camera zoom pulse
+    print("  Starting camera zoom pulse...")
+    ws_send(ws, "camera.animate",
+            id="zoom-pulse",
+            keyframes=[
+                {"t": 0.0, "distance": 12, "fov": 45},
+                {"t": 1.0, "distance": 6, "fov": 55},
+            ],
+            duration_ms=4000,
+            loop=True,
+            ping_pong=True,
+            easing="ease_in_out")
 
-        # Manually animate cube color/opacity via patches
-        print("  Manually cycling cube color and opacity...")
-        colors = [
-            [1.0, 0.3, 0.1], [0.1, 0.8, 1.0], [0.3, 1.0, 0.2],
-            [1.0, 0.8, 0.0], [0.8, 0.2, 1.0], [1.0, 0.3, 0.1],
-        ]
-        for color in colors:
-            ws_send(ws, "dynamic.patch",
-                    layer_id="dyn_stretching_cube",
-                    color=color, opacity=0.5 + 0.5 * color[1])
-            time.sleep(0.5)
-    else:
-        # Animation engine available — use keyframed animation
-        print("  Starting keyframed object animation (scale + color pulse)...")
-        ws_send(ws, "dynamic.animate",
-                id="cube-anim",
-                layer_id="dyn_stretching_cube",
-                keyframes=[
-                    {"t": 0.0, "scale": [1, 1, 1], "color": [1.0, 0.3, 0.1], "opacity": 1.0},
-                    {"t": 0.5, "scale": [1, 1, 3], "color": [0.1, 0.8, 1.0], "opacity": 0.6},
-                    {"t": 1.0, "scale": [1, 1, 1], "color": [1.0, 0.3, 0.1], "opacity": 1.0},
-                ],
-                duration_ms=3000,
-                loop=True,
-                ping_pong=True,
-                easing="ease_in_out")
+    # Keyframed object animation (color + opacity)
+    print("  Starting keyframed object animation (color + opacity pulse)...")
+    ws_send(ws, "dynamic.animate",
+            id="cube-anim",
+            layer_id="dyn_stretching_cube",
+            keyframes=[
+                {"t": 0.0, "color": [1.0, 0.3, 0.1], "opacity": 1.0},
+                {"t": 0.5, "color": [0.1, 0.8, 1.0], "opacity": 0.6},
+                {"t": 1.0, "color": [1.0, 0.3, 0.1], "opacity": 1.0},
+            ],
+            duration_ms=3000,
+            loop=True,
+            ping_pong=True,
+            easing="ease_in_out")
 
-        print("  Animations running for 8 seconds...")
-        time.sleep(8)
+    # Continuous color fade on bbox layer
+    print("  Starting continuous color fade on bboxes...")
+    ws_send(ws, "dynamic.transform_continuous",
+            id="bbox-fade", layer_id="dyn_demo_boxes",
+            property="color", target=[0.0, 0.3, 1.0], duration_ms=5000)
 
-        print("  Stopping animations...")
-        ws_send(ws, "transform.stop", id="demo-orbit")
-        ws_send(ws, "animation.stop", id="cube-anim")
+    print("  Animations running for 8 seconds...")
+    time.sleep(8)
 
+    # Stop all animations
+    print("  Stopping all animations...")
+    ws_send(ws, "transform.stop_all")
     print("  Animation demo complete.")
 
 
