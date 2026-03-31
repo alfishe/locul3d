@@ -454,6 +454,6 @@ METADATA_HANDLERS = {h.kind: h for h in [
     RackMetadataHandler(),
     EmptySpaceMetadataHandler(),
     RackRegionMetadataHandler(),
-    MtsMetadataHandler(),
-    MtsBoxMetadataHandler(),
+    # MtsMetadataHandler(),      # TODO: re-enable when MTS column handling is ready
+    # MtsBoxMetadataHandler(),   # TODO: re-enable when MTS box handling is ready
 ]}
