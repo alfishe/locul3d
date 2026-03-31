@@ -1112,8 +1112,6 @@ class CommandDispatcher:
 
     def _capture_frame(self, save_to=None, fmt="png") -> dict:
         """Render one frame at full quality and return/save it."""
-        import base64
-
         vp = self._viewport
 
         # Advance animation engine by one tick if in capture mode
@@ -1126,14 +1124,24 @@ class CommandDispatcher:
         vp.repaint()
 
         # Grab framebuffer
-        from PySide6.QtCore import QBuffer, QIODevice
         img = vp.grabFramebuffer()
+        w, h = img.width(), img.height()
 
         # Save to disk if requested
         if save_to:
             img.save(save_to, fmt.upper())
+            # When saving to disk, skip expensive base64 transfer
+            return {
+                "status": "ok",
+                "format": fmt,
+                "width": w,
+                "height": h,
+                "saved_to": save_to,
+            }
 
-        # Return as base64
+        # Return as base64 (no save_to — client wants the image data)
+        import base64
+        from PySide6.QtCore import QBuffer, QIODevice
         buf = QBuffer()
         buf.open(QIODevice.OpenModeFlag.WriteOnly)
         img.save(buf, fmt.upper())
@@ -1142,8 +1150,8 @@ class CommandDispatcher:
         return {
             "status": "ok",
             "format": fmt,
-            "width": img.width(),
-            "height": img.height(),
+            "width": w,
+            "height": h,
             "size_bytes": len(buf.data()),
             "image": b64,
         }
