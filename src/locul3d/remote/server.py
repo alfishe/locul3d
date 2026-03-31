@@ -117,11 +117,20 @@ class RemoteServer:
         dynamic.setup_routes(app, self._dispatcher)
         shapes.setup_routes(app, self._dispatcher)
 
+        # ── OpenAPI spec ─────────────────────────────────────────────
+
+        app.router.add_get("/openapi.json", self._openapi_handler)
+
         # ── WebSocket ─────────────────────────────────────────────────
 
         app.router.add_get("/ws", self._ws_handler)
 
         return app
+
+    async def _openapi_handler(self, request: web.Request) -> web.Response:
+        from .openapi import generate_openapi_spec
+        spec = generate_openapi_spec()
+        return web.json_response(spec)
 
     # ── WebSocket handler ─────────────────────────────────────────────
 

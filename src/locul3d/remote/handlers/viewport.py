@@ -73,13 +73,18 @@ async def _clear_clip(request: web.Request) -> web.Response:
 
 
 async def _get_render_mode(request: web.Request) -> web.Response:
-    # Placeholder — will be fully implemented in Phase 5
-    return web.json_response({"mode": "realtime"})
+    dispatcher: CommandDispatcher = request.app["dispatcher"]
+    bridge = dispatcher._bridge
+    result = await bridge.invoke_on_qt(dispatcher._get_render_mode)
+    return web.json_response(result)
 
 
 async def _set_render_mode(request: web.Request) -> web.Response:
     dispatcher: CommandDispatcher = request.app["dispatcher"]
     data = await request.json()
     update = RenderModeUpdate(**data)
-    # Placeholder — will be fully implemented in Phase 5
-    return web.json_response({"status": "ok", "mode": update.mode})
+    bridge = dispatcher._bridge
+    result = await bridge.invoke_on_qt(
+        lambda: dispatcher._set_render_mode(update.mode, update.width, update.height)
+    )
+    return web.json_response(result)

@@ -1051,8 +1051,102 @@ class CommandDispatcher:
 
     def _handle_render_command(self, msg_type: str, data: dict) -> dict:
         """Handle render mode commands (runs on Qt thread)."""
-        # Placeholder — will be implemented in Phase 5
-        return {"status": "ok", "message": f"render command {msg_type} not yet implemented"}
+
+        if msg_type == "render.set_mode":
+            mode = data.get("mode", "realtime")
+            width = data.get("width")
+            height = data.get("height")
+            return self._set_render_mode(mode, width, height)
+
+        if msg_type == "render.get_mode":
+            return self._get_render_mode()
+
+        if msg_type == "render.capture_frame":
+            save_to = data.get("save_to")
+            fmt = data.get("format", "png")
+            return self._capture_frame(save_to, fmt)
+
+        if msg_type == "render.set_target_fps":
+            fps = data.get("fps", 60)
+            self._capture_target_fps = max(1, int(fps))
+            return {"status": "ok", "target_fps": self._capture_target_fps}
+
+        return {"status": "error", "message": f"Unknown render command: {msg_type}"}
+
+    def _get_render_mode(self) -> dict:
+        mode = getattr(self, "_render_mode", "realtime")
+        return {
+            "mode": mode,
+            "width": getattr(self, "_capture_width", None),
+            "height": getattr(self, "_capture_height", None),
+            "target_fps": getattr(self, "_capture_target_fps", 60),
+        }
+
+    def _set_render_mode(self, mode: str, width=None, height=None) -> dict:
+        self._render_mode = mode
+        vp = self._viewport
+
+        if mode == "capture":
+            self._capture_width = width
+            self._capture_height = height
+            # Resize viewport for capture resolution
+            if width and height:
+                vp.setFixedSize(width, height)
+            # Disable LOD for full quality
+            vp._interacting = False
+            if self._animation_engine:
+                self._animation_engine._render_mode = "capture"
+        else:
+            # Restore realtime mode
+            from PySide6.QtWidgets import QWIDGETSIZE_MAX
+            vp.setMinimumSize(0, 0)
+            vp.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX)
+            if self._animation_engine:
+                self._animation_engine._render_mode = "realtime"
+
+        self.fire_event("event.render_mode_changed", {
+            "mode": mode, "width": width, "height": height,
+        })
+        vp.update()
+        return {"status": "ok", "mode": mode}
+
+    def _capture_frame(self, save_to=None, fmt="png") -> dict:
+        """Render one frame at full quality and return/save it."""
+        import base64
+
+        vp = self._viewport
+
+        # Advance animation engine by one tick if in capture mode
+        if self._animation_engine and getattr(self, "_render_mode", "realtime") == "capture":
+            self._animation_engine._tick()
+
+        # Force synchronous full-quality render
+        vp._interacting = False
+        vp.update()
+        vp.repaint()
+
+        # Grab framebuffer
+        from PySide6.QtCore import QBuffer, QIODevice
+        img = vp.grabFramebuffer()
+
+        # Save to disk if requested
+        if save_to:
+            img.save(save_to, fmt.upper())
+
+        # Return as base64
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, fmt.upper())
+        b64 = base64.b64encode(bytes(buf.data())).decode()
+
+        return {
+            "status": "ok",
+            "format": fmt,
+            "width": img.width(),
+            "height": img.height(),
+            "size_bytes": len(buf.data()),
+            "image": b64,
+        }
 
     # ── Event Broadcasting ────────────────────────────────────────────
 
