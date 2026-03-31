@@ -17,6 +17,16 @@ OBB_EDGES = [
     (7, 4), (7, 5), (7, 6),
 ]
 
+# 6 faces of OBB as corner-index quads (Open3D get_box_points() ordering)
+OBB_FACES = [
+    (0, 1, 4, 2),
+    (0, 2, 5, 3),
+    (0, 3, 6, 1),
+    (7, 4, 1, 6),
+    (7, 5, 2, 4),
+    (7, 6, 3, 5),
+]
+
 # AABB edge connectivity: 8 corners ordered as
 # 0=(xmin,ymin,zmin) 1=(xmax,ymin,zmin) 2=(xmax,ymax,zmin) 3=(xmin,ymax,zmin)
 # 4=(xmin,ymin,zmax) 5=(xmax,ymin,zmax) 6=(xmax,ymax,zmax) 7=(xmin,ymax,zmax)

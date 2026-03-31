@@ -228,6 +228,7 @@ def _load_with_open3d(path: str, layer: 'LayerData'):
                         dtype=np.float32)
 
             layer.layer_type = "wireframe"
+            layer.opacity = 0.0  # wireframe-only by default; slider fills surfaces
             layer.loaded = True
             return
     except Exception:
