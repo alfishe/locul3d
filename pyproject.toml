@@ -37,6 +37,9 @@ dependencies = [
     "Pillow>=9.0.0",
 ]
 
+[project.optional-dependencies]
+remote = ["aiohttp>=3.9.0", "pydantic>=2.0.0"]
+
 [project.scripts]
 locul3d = "locul3d.__main__:main"
 locul3d-viewer = "locul3d.viewer.main:main"

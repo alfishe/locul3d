@@ -8,3 +8,7 @@ scipy>=1.10.0
 # E57 + panorama support
 pye57>=0.4.0
 Pillow>=9.0.0
+
+# Remote Control API (optional)
+aiohttp>=3.9.0
+pydantic>=2.0.0
