@@ -235,9 +235,11 @@ class AnnotationRowWidget(QFrame):
         header_layout.setContentsMargins(4, 2, 4, 2)
         header_layout.setSpacing(4)
 
-        # Visibility checkbox (inherits global theme stylesheet)
+        # Visibility checkbox — sync from actual item state
+        all_bboxes = group.get("bboxes", [])
+        all_visible = all(b.visible for b in all_bboxes) if all_bboxes else True
         self.checkbox = QCheckBox()
-        self.checkbox.setChecked(True)
+        self.checkbox.setChecked(all_visible)
         self.checkbox.setToolTip("Show/Hide all")
         self.checkbox.toggled.connect(self._on_group_visibility)
         header_layout.addWidget(self.checkbox)
