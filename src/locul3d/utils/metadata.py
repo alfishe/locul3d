@@ -6,7 +6,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, MeasurementType, WallDistStyle
+from ..core.geometry import (AnnotationCategory, BBoxItem, GapItem, MeasurementType,
+                              PlaneItem, WallDistStyle)
 
 try:
     import yaml
@@ -61,14 +62,14 @@ class MetadataHandler(ABC):
 
     def parse(
         self, items: dict
-    ) -> Tuple[List[BBoxItem], List[GapItem]]:
-        """Parse pre-loaded metadata items → (bboxes, gaps).
+    ) -> Tuple[List[BBoxItem], List[GapItem], List[PlaneItem]]:
+        """Parse pre-loaded metadata items → (bboxes, gaps, planes).
 
         Args:
             items: {idx: data_dict, ...} — already grouped by kind.
         """
         if not items:
-            return [], []
+            return [], [], []
 
         # Detect format: new format has "width_mm", legacy has "length_mm"
         sample = next(iter(items.values()))
@@ -90,7 +91,7 @@ class MetadataHandler(ABC):
             idx_to_bbox[idx] = bbox
 
         if not self.enabled_measurements:
-            return bboxes, []
+            return bboxes, [], []
 
         # Detect corridor axis
         axis = _detect_corridor_axis_from_spread(items)
@@ -237,10 +238,11 @@ class MetadataHandler(ABC):
             gaps.append(width_gap)
 
         if MeasurementType.WALL_DISTANCE not in self.enabled_measurements:
-            return bboxes, gaps
+            return bboxes, gaps, []
 
         # Build wall distance annotations at Z=0, staggered per row
         # Group racks by row for shared spine
+        planes = []
         row_items = {}  # row_index → [(idx, data)]
         for ri, row in enumerate(rows):
             for _, idx in row:
@@ -268,15 +270,17 @@ class MetadataHandler(ABC):
             row_wall_face = row_cross + wall_side_sign * mean_half
 
             if self.wall_dist_style == WallDistStyle.COMB:
-                gaps.extend(self._build_wall_dist_comb(
+                comb_gaps, comb_planes = self._build_wall_dist_comb(
                     with_wall, idx_to_bbox, axis, cross_axis,
-                    wall_side_sign, row_wall_face, wall_high))
+                    wall_side_sign, row_wall_face, wall_high)
+                gaps.extend(comb_gaps)
+                planes.extend(comb_planes)
             else:
                 gaps.extend(self._build_wall_dist_staggered(
                     with_wall, idx_to_bbox, axis, cross_axis,
                     wall_side_sign, row_wall_face, wall_high))
 
-        return bboxes, gaps
+        return bboxes, gaps, planes
 
     def _build_wall_dist_staggered(self, with_wall, idx_to_bbox, axis,
                                     cross_axis, cross_sign, row_inner, wall_high):
@@ -355,8 +359,10 @@ class MetadataHandler(ABC):
             at that item's Y — labeled with wall distance
           - Projections: short corridor-axis bars at each item's floor
             footprint showing the projected item outline
+          - Planes: semi-transparent floor quads from item side to spine
         """
         gaps = []
+        planes = []
         all_parents = [b for b in [idx_to_bbox.get(idx) for idx, _, _, _ in with_wall] if b]
 
         # Spine X position: offset from row inner face into the corridor
@@ -401,16 +407,24 @@ class MetadataHandler(ABC):
             item_corridor = c[axis]
             ann_z = c[2] if self.use_item_z else 0.0
 
-            # Tick: from spine to near edge of item projection bar
             half_cross = sz[cross_axis] / 2
+            half_corridor = sz[axis] / 2
             item_near_edge = item_cross + cross_sign * half_cross
+
+            # Edge of MTS box closest to the measurement wall
+            if wall_high >= item_corridor:
+                item_wall_edge = item_corridor + half_corridor
+            else:
+                item_wall_edge = item_corridor - half_corridor
+
+            # Tick: from spine to near edge of item projection bar
             if axis == 1:
-                edge_a = [spine_cross, item_corridor, ann_z]
-                edge_b = [item_near_edge, item_corridor, ann_z]
+                edge_a = [spine_cross, item_wall_edge, ann_z]
+                edge_b = [item_near_edge, item_wall_edge, ann_z]
                 tick_dir = [0, 0, 0.03]
             else:
-                edge_a = [item_corridor, spine_cross, ann_z]
-                edge_b = [item_corridor, item_near_edge, ann_z]
+                edge_a = [item_wall_edge, spine_cross, ann_z]
+                edge_b = [item_wall_edge, item_near_edge, ann_z]
                 tick_dir = [0, 0, 0.03]
 
             tick = GapItem(
@@ -427,13 +441,13 @@ class MetadataHandler(ABC):
                 tick.parent_bboxes = [owner]
             gaps.append(tick)
 
-            # Projection: item wall face projected on floor (along cross-axis)
+            # Projection: item wall face projected on floor at wall edge
             if axis == 1:
-                proj_a = [item_cross - half_cross, item_corridor, ann_z]
-                proj_b = [item_cross + half_cross, item_corridor, ann_z]
+                proj_a = [item_cross - half_cross, item_wall_edge, ann_z]
+                proj_b = [item_cross + half_cross, item_wall_edge, ann_z]
             else:
-                proj_a = [item_corridor, item_cross - half_cross, ann_z]
-                proj_b = [item_corridor, item_cross + half_cross, ann_z]
+                proj_a = [item_wall_edge, item_cross - half_cross, ann_z]
+                proj_b = [item_wall_edge, item_cross + half_cross, ann_z]
             proj = GapItem(
                 proj_a, proj_b, None, cross_axis, True,
                 anchor_a=proj_a, anchor_b=proj_b,
@@ -446,7 +460,27 @@ class MetadataHandler(ABC):
                 proj.parent_bboxes = [owner]
             gaps.append(proj)
 
-        return gaps
+            # Vertical plane: rises from floor to bottom of the box
+            box_bottom = c[2] - sz[2] / 2
+            if axis == 1:
+                plane = PlaneItem(
+                    axis='xz',
+                    center=[item_cross - half_cross, item_wall_edge, 0.0],
+                    size=[sz[cross_axis], box_bottom],
+                    color=list(self.bbox_color),
+                    opacity=0.15,
+                )
+            else:
+                plane = PlaneItem(
+                    axis='yz',
+                    center=[item_wall_edge, item_cross - half_cross, 0.0],
+                    size=[sz[cross_axis], box_bottom],
+                    color=list(self.bbox_color),
+                    opacity=0.15,
+                )
+            planes.append(plane)
+
+        return gaps, planes
 
 
 def _detect_corridor_axis(items, pairs):

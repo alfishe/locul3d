@@ -326,13 +326,17 @@ class AnnotationRowWidget(QFrame):
     def set_visible(self, visible: bool):
         """Programmatically set visibility (e.g. from Show/Hide All)."""
         self.checkbox.setChecked(visible)
+        # Ensure visibility is applied even if checkbox state didn't change
+        self._on_group_visibility(visible)
 
     def _on_group_visibility(self, checked: bool):
-        """Toggle all bboxes + gaps in the group."""
+        """Toggle all bboxes + gaps + planes in the group."""
         for bbox in self.group.get("bboxes", []):
             bbox.visible = checked
         for gap in self.group.get("measurements", []):
             gap.visible = checked
+        for plane in self.group.get("planes", []):
+            plane.visible = checked
         # Sync child checkboxes
         for cb in self._child_checkboxes:
             cb.blockSignals(True)

@@ -766,6 +766,7 @@ class EditorWindow(QMainWindow):
         """
         new_bboxes = []
         new_gaps = []
+        new_planes = []
         new_groups = []
 
         kind_groups = load_all_metadata(folder_path)
@@ -774,7 +775,7 @@ class EditorWindow(QMainWindow):
             if handler is None:
                 continue
             try:
-                bboxes, gaps = handler.parse(items)
+                bboxes, gaps, planes = handler.parse(items)
             except Exception:
                 continue
             if not bboxes and not gaps:
@@ -784,12 +785,14 @@ class EditorWindow(QMainWindow):
                 bbox.scene_coords = True
             # Bboxes kept in groups for per-item toggles but not rendered
             new_gaps.extend(gaps)
+            new_planes.extend(planes)
 
             new_groups.append({
                 "name": handler.display_name,
                 "color": bboxes[0].color if bboxes else gaps[0].color,
                 "bboxes": list(bboxes),
                 "measurements": list(gaps),
+                "planes": list(planes),
             })
 
         if not new_bboxes and not new_gaps:
@@ -801,6 +804,7 @@ class EditorWindow(QMainWindow):
             self.gl_viewport.scene_bboxes.extend(new_bboxes)
             self.gap_items.extend(new_gaps)
             self.gl_viewport.gaps = self.gap_items
+            self.planes.extend(new_planes)
             self.layer_panel.annotation_groups.extend(new_groups)
         else:
             # Replace previous pipeline annotations (mutate in-place to
@@ -811,6 +815,7 @@ class EditorWindow(QMainWindow):
             self.gl_viewport.scene_bboxes = new_bboxes
             self.gap_items = new_gaps
             self.gl_viewport.gaps = new_gaps
+            self.planes.extend(new_planes)
             self.layer_panel.annotation_groups = new_groups
 
         self.bbox_panel.rebuild_list()

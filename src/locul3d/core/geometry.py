@@ -219,7 +219,7 @@ class PlaneItem:
                 [c[0], c[1],     c[2]],
                 [c[0], c[1] + w, c[2]],
                 [c[0], c[1] + w, c[2] + h],
-                [c[0], c[1] - w, c[2] + h],
+                [c[0], c[1],     c[2] + h],
             ])
 
     def to_dict(self):
