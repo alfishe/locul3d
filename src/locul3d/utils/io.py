@@ -187,6 +187,103 @@ def _try_fast_ply(path: str, layer: 'LayerData') -> bool:
 # Open3D fallback loader
 # ---------------------------------------------------------------------------
 
+def _parse_mtl_colors(mtl_path: str) -> dict:
+    """Parse a Wavefront .mtl file and return {material_name: (r, g, b)} floats 0..1."""
+    materials = {}
+    current = None
+    try:
+        with open(mtl_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('newmtl '):
+                    current = line[7:].strip()
+                elif line.startswith('Kd ') and current is not None:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        materials[current] = (
+                            float(parts[1]), float(parts[2]), float(parts[3]),
+                        )
+    except (OSError, ValueError):
+        pass
+    return materials
+
+
+def _parse_obj_face_materials(obj_path: str) -> list:
+    """Parse OBJ file to extract per-face material assignments.
+
+    Returns list of (material_name, face_count) in order of appearance.
+    """
+    groups = []
+    current_mtl = None
+    face_count = 0
+    with open(obj_path, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            if line.startswith('usemtl '):
+                if current_mtl is not None and face_count > 0:
+                    groups.append((current_mtl, face_count))
+                current_mtl = line[7:].strip()
+                face_count = 0
+            elif line.startswith('f '):
+                face_count += 1
+    if current_mtl is not None and face_count > 0:
+        groups.append((current_mtl, face_count))
+    return groups
+
+
+def _apply_mtl_colors_to_mesh(path: str, mesh, layer: 'LayerData'):
+    """If an OBJ has a companion .mtl with Kd colors, expand to per-vertex colors."""
+    if not path.lower().endswith('.obj'):
+        return False
+
+    import os
+    # Find mtllib reference in OBJ header
+    mtl_name = None
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                if line.startswith('mtllib '):
+                    mtl_name = line[7:].strip()
+                    break
+                if line.startswith('v '):
+                    break  # past header, stop looking
+    except OSError:
+        return False
+
+    if not mtl_name:
+        return False
+
+    mtl_path = os.path.join(os.path.dirname(path), mtl_name)
+    if not os.path.isfile(mtl_path):
+        return False
+
+    materials = _parse_mtl_colors(mtl_path)
+    if not materials:
+        return False
+
+    face_groups = _parse_obj_face_materials(path)
+    if not face_groups:
+        return False
+
+    triangles = np.asarray(mesh.triangles)
+    total_faces = sum(count for _, count in face_groups)
+    if total_faces != len(triangles):
+        return False
+
+    n_verts = len(mesh.vertices)
+    vertex_colors = np.full((n_verts, 3), 0.7, dtype=np.float32)
+
+    face_idx = 0
+    for mat_name, count in face_groups:
+        color = materials.get(mat_name, (0.7, 0.7, 0.7))
+        for i in range(face_idx, face_idx + count):
+            for vi in triangles[i]:
+                vertex_colors[vi] = color
+        face_idx += count
+
+    layer.colors = vertex_colors
+    return True
+
+
 def _load_with_open3d(path: str, layer: 'LayerData'):
     """Load geometry via Open3D (meshes, wireframes, ASCII PLY, OBJ, STL)."""
     import open3d as o3d
@@ -255,6 +352,8 @@ def _load_with_open3d(path: str, layer: 'LayerData'):
             if mesh.has_vertex_colors():
                 layer.colors = np.asarray(mesh.vertex_colors,
                                           dtype=np.float32)
+            else:
+                _apply_mtl_colors_to_mesh(path, mesh, layer)
             if mesh.has_vertex_normals():
                 layer.normals = np.asarray(mesh.vertex_normals,
                                            dtype=np.float32)
