@@ -6,12 +6,26 @@ import numpy as np
 from typing import Optional
 
 
+class MeasurementType(enum.Enum):
+    """Type of gap measurement annotation."""
+    NEIGHBOR = "neighbor"
+    DIMENSION = "dimension"
+    WALL_DISTANCE = "wall_dist"
+
+
+class WallDistStyle(enum.Enum):
+    """How wall distance annotations are displayed."""
+    STAGGERED = "staggered"  # one line per item, parallel staggered offsets
+    COMB = "comb"            # one spine, perpendicular ticks to each item
+
+
 class AnnotationCategory(enum.Enum):
     """Pipeline annotation category for grouping bboxes and gaps."""
     RACK = "rack"
     EMPTY_SPACE = "empty_space"
-    MTS = "mts"
+    MTS = "mts_stack"
     MTS_BOX = "mts_box"
+    REGION_SUBZONE = "region_subzone"
 
 
 class GapItem:
@@ -31,6 +45,8 @@ class GapItem:
         self.edge_b = np.array(edge_b if edge_b is not None else [0, 0, 0],
                                dtype=np.float64)
         self.gap_mm = float(gap_mm) if gap_mm is not None else None
+        self.parent_bboxes = []  # owning BBoxItem(s) for per-item toggle
+        self.measurement_type = None  # MeasurementType enum value
         self.axis = int(axis)  # 0=X, 1=Y corridor axis
         self.visible = visible
         # Where ticks connect to the bbox face
@@ -203,7 +219,7 @@ class PlaneItem:
                 [c[0], c[1],     c[2]],
                 [c[0], c[1] + w, c[2]],
                 [c[0], c[1] + w, c[2] + h],
-                [c[0], c[1] - w, c[2] + h],
+                [c[0], c[1],     c[2] + h],
             ])
 
     def to_dict(self):

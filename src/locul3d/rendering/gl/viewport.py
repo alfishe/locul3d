@@ -720,32 +720,56 @@ class BaseGLViewport(QOpenGLWidget):
         glDisableClientState(GL_COLOR_ARRAY)
 
     def _draw_wireframe_layer(self, layer):
-        """Render a wireframe layer (OBB edges) using immediate mode.
+        """Render a wireframe layer (OBB edges + optional filled faces).
 
         Wireframe overlays have very few vertices (typically <200),
         so immediate mode avoids VBO state issues at no performance cost.
+
+        The opacity slider controls surface fill:
+          0%   → wireframe only (edges at full colour)
+          1-99% → semi-transparent filled faces + solid edges
+          100% → fully opaque fill + solid edges
         """
         if layer.line_points is None or len(layer.line_points) == 0:
             return
 
-        glDisable(GL_LIGHTING)
-        glLineWidth(3.0)
-
-        # Wireframes always use the layer's swatch color (uniform) so all
-        # edges in a single PLY overlay share one colour.
         if layer.color is not None:
             r, g, b = layer.color[:3]
-            glColor4f(r, g, b, layer.opacity)
         else:
-            glColor4f(1.0, 0.5, 0.0, layer.opacity)
+            r, g, b = 1.0, 0.5, 0.0
 
-        needs_blend = layer.opacity < 0.99
-        if needs_blend:
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
-            glBlendColor(0.0, 0.0, 0.0, layer.opacity)
-        else:
-            glDisable(GL_BLEND)
+        fill_alpha = layer.opacity
+
+        # --- Pass 1: Filled faces (when opacity > 0) ---
+        if fill_alpha > 0.01:
+            # Prefer box_points from meta; fall back to layer.points (unique corners)
+            box_pts = layer.meta.get("box_points")
+            if not box_pts or len(box_pts) != 8:
+                box_pts = layer.points
+            if box_pts is not None and len(box_pts) == 8:
+                from locul3d.core.constants import AABB_FACES
+                import numpy as np
+                corners = np.array(box_pts, dtype=np.float64)
+
+                glDisable(GL_LIGHTING)
+                glEnable(GL_BLEND)
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                glDepthMask(GL_FALSE)
+                glColor4f(r, g, b, fill_alpha)
+
+                for face in AABB_FACES:
+                    glBegin(GL_QUADS)
+                    for vi in face:
+                        glVertex3dv(corners[vi])
+                    glEnd()
+
+                glDepthMask(GL_TRUE)
+
+        # --- Pass 2: Wireframe edges (always solid) ---
+        glDisable(GL_LIGHTING)
+        glDisable(GL_BLEND)
+        glLineWidth(3.0)
+        glColor4f(r, g, b, 1.0)
 
         pts = layer.line_points
         glBegin(GL_LINES)
@@ -753,10 +777,7 @@ class BaseGLViewport(QOpenGLWidget):
             glVertex3fv(pts[i])
         glEnd()
 
-        if needs_blend:
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnable(GL_BLEND)
-
         glEnable(GL_LIGHTING)
 
     def _draw_axes(self):

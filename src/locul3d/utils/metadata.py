@@ -2,10 +2,12 @@
 
 import re
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
-from ..core.geometry import AnnotationCategory, BBoxItem, GapItem
+from ..core.geometry import (AnnotationCategory, BBoxItem, GapItem, MeasurementType,
+                              PlaneItem, WallDistStyle)
 
 try:
     import yaml
@@ -15,21 +17,43 @@ except ImportError:
     _HAS_YAML = False
 
 
-class MetadataHandler(ABC):
-    """Base class for auto-detecting and parsing *_metadata.yaml files."""
+def load_all_metadata(directory: Path) -> Dict[str, dict]:
+    """Read all *_metadata.yaml files, group by 'kind' field.
 
-    file_pattern: str  # glob pattern, e.g. "rack_*_metadata.yaml"
+    Returns {kind_str: {sequential_idx: data_dict, ...}, ...}.
+    Files without a 'kind' field are grouped under 'unknown'.
+    """
+    if not _HAS_YAML:
+        return {}
+    groups = defaultdict(dict)
+    for path in sorted(directory.glob("*_metadata.yaml")):
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        if data is None:
+            continue
+        kind = data.get("kind", "unknown")
+        idx = len(groups[kind])
+        groups[kind][idx] = data
+    return dict(groups)
+
+
+class MetadataHandler(ABC):
+    """Base class for parsing metadata items into bbox + gap annotations."""
+
+    kind: str  # YAML 'kind' field value, e.g. "rack", "mts", "region_subzone"
     category: AnnotationCategory
     display_name: str  # shown in Annotations panel, e.g. "Racks"
     bbox_color: tuple  # RGB 0-1
     gap_color: tuple  # RGB 0-1
     neighbor_index_key: str  # key in neighbor dict, e.g. "rack_index"
     use_item_z: bool = False  # True = annotations at item Z; False = at Z=0
-    skip_neighbor_gaps: bool = False  # True = don't compute neighbor pairs
-
-    def detect(self, directory: Path) -> bool:
-        """Return True if this handler's metadata files exist in directory."""
-        return any(directory.glob(self.file_pattern))
+    wall_dist_style: WallDistStyle = WallDistStyle.STAGGERED
+    # Which measurement types to generate (empty set = bboxes only)
+    enabled_measurements: frozenset = frozenset({
+        MeasurementType.DIMENSION,
+        MeasurementType.NEIGHBOR,
+        MeasurementType.WALL_DISTANCE,
+    })
 
     # Cross-axis offset from rack inner face (meters)
     _WIDTH_OFFSET = 0.10      # tier 1: width brackets
@@ -37,55 +61,37 @@ class MetadataHandler(ABC):
     wall_dist_color: tuple = (1.0, 0.2, 0.2)  # red
 
     def parse(
-        self, directory: Path
-    ) -> Tuple[List[BBoxItem], List[GapItem]]:
-        """Parse metadata files → (bboxes, gaps).
+        self, items: dict
+    ) -> Tuple[List[BBoxItem], List[GapItem], List[PlaneItem]]:
+        """Parse pre-loaded metadata items → (bboxes, gaps, planes).
 
-        Supports two metadata formats:
-          - Legacy: has "index", "length_mm", "neighbor_left"/"neighbor_right"
-                    dicts, "distance_to_high_wall_mm", "wall_high"
-          - Current: index in filename, "width_mm", "neighbor_left_mm"/
-                     "neighbor_right_mm" scalars, "distance_wall_a_mm"/
-                     "distance_wall_b_mm"
+        Args:
+            items: {idx: data_dict, ...} — already grouped by kind.
         """
-        if not _HAS_YAML:
-            return [], []
-
-        # Load all metadata files
-        items = {}
-        for path in sorted(directory.glob(self.file_pattern)):
-            with open(path) as f:
-                data = yaml.safe_load(f)
-            if data is None:
-                continue
-            # Extract index: from data or from filename
-            if "index" in data:
-                idx = data["index"]
-            else:
-                # Match all digits between last prefix and _metadata,
-                # e.g. "rack_3_metadata" → "3", "mts_box_10_2_metadata" → "10_2"
-                stem = path.stem.removesuffix("_metadata")
-                # Use sequential index keyed on filename for uniqueness
-                idx = len(items)
-            items[idx] = data
-
         if not items:
-            return [], []
+            return [], [], []
 
         # Detect format: new format has "width_mm", legacy has "length_mm"
         sample = next(iter(items.values()))
         new_format = "width_mm" in sample and "index" not in sample
 
-        # Create BBoxItems
+        # Create BBoxItems (one per metadata file, sorted by index)
         bboxes = []
-        for idx in sorted(items):
+        sorted_indices = sorted(items)
+        idx_to_bbox = {}  # item index → BBoxItem for gap linkage
+        for idx in sorted_indices:
             r = items[idx]
-            bboxes.append(BBoxItem(
-                label=self.category.value,
+            bbox = BBoxItem(
+                label=r.get("id", self.category.value),
                 center=r["center"],
                 size=r["size"],
                 color=list(self.bbox_color),
-            ))
+            )
+            bboxes.append(bbox)
+            idx_to_bbox[idx] = bbox
+
+        if not self.enabled_measurements:
+            return bboxes, [], []
 
         # Detect corridor axis
         axis = _detect_corridor_axis_from_spread(items)
@@ -93,7 +99,7 @@ class MetadataHandler(ABC):
 
         # Build neighbor gap pairs
         pairs = {}  # (min_idx, max_idx) → gap_mm
-        if self.skip_neighbor_gaps:
+        if MeasurementType.NEIGHBOR not in self.enabled_measurements:
             pass
         elif new_format:
             pairs = _compute_neighbor_pairs_from_scalars(items, axis)
@@ -143,21 +149,26 @@ class MetadataHandler(ABC):
                 anchor_a = [a_right, cross, a_top_z]
                 anchor_b = [b_left, cross, b_top_z]
 
-            gaps.append(GapItem(
+            neighbor_gap = GapItem(
                 edge_a, edge_b, gap_mm, axis, True,
                 anchor_a=anchor_a, anchor_b=anchor_b,
                 tick_dir=[0, 0, 0.03],
                 color=self.gap_color,
                 category=self.category,
-            ))
+            )
+            neighbor_gap.measurement_type = MeasurementType.NEIGHBOR
+            neighbor_gap.parent_bboxes = [
+                b for b in [idx_to_bbox.get(a_idx), idx_to_bbox.get(b_idx)] if b]
+            gaps.append(neighbor_gap)
 
-        # Build width annotations at Z=0, offset into corridor
+        # Build dimension annotations at Z=0, offset into corridor
         # Cluster racks by cross-axis position to detect row sides
         cross_positions = sorted(
             [(r["center"][cross_axis], idx) for idx, r in items.items()])
         rows = _cluster_cross_rows(cross_positions)
 
-        # For each row, determine inward direction (toward nearest other row)
+        # Determine cross-axis direction per item from side_from_wall_b,
+        # falling back to nearest-row heuristic for legacy data.
         row_means = [sum(x for x, _ in row) / len(row) for row in rows]
         row_directions = {}  # idx → cross_sign
         for ri, row in enumerate(rows):
@@ -165,13 +176,21 @@ class MetadataHandler(ABC):
             others = [m for i, m in enumerate(row_means) if i != ri]
             if others:
                 nearest = min(others, key=lambda m: abs(m - mean))
-                sign = 1 if mean < nearest else -1
+                fallback_sign = 1 if mean < nearest else -1
             else:
-                sign = 1  # single row, default right
+                fallback_sign = 1
             for _, idx in row:
-                row_directions[idx] = sign
+                side_str = items[idx].get("side_from_wall_b", "")
+                if side_str == "right":
+                    row_directions[idx] = 1
+                elif side_str == "left":
+                    row_directions[idx] = -1
+                else:
+                    row_directions[idx] = fallback_sign
 
         for idx in sorted(items):
+            if MeasurementType.DIMENSION not in self.enabled_measurements:
+                break
             r = items[idx]
             # Support both "length_mm" (legacy) and "width_mm" (current)
             length_mm = r.get("length_mm") or r.get("width_mm")
@@ -205,16 +224,25 @@ class MetadataHandler(ABC):
                 anchor_b = [rack_right, rack_inner, ann_z]
                 tick_dir = [0, cross_sign * 0.03, 0]
 
-            gaps.append(GapItem(
+            width_gap = GapItem(
                 edge_a, edge_b, length_mm, axis, True,
                 anchor_a=anchor_a, anchor_b=anchor_b,
                 tick_dir=tick_dir,
                 color=self.gap_color,
                 category=self.category,
-            ))
+            )
+            width_gap.measurement_type = MeasurementType.DIMENSION
+            owner = idx_to_bbox.get(idx)
+            if owner:
+                width_gap.parent_bboxes = [owner]
+            gaps.append(width_gap)
+
+        if MeasurementType.WALL_DISTANCE not in self.enabled_measurements:
+            return bboxes, gaps, []
 
         # Build wall distance annotations at Z=0, staggered per row
         # Group racks by row for shared spine
+        planes = []
         row_items = {}  # row_index → [(idx, data)]
         for ri, row in enumerate(rows):
             for _, idx in row:
@@ -234,68 +262,225 @@ class MetadataHandler(ABC):
             with_wall.sort(key=lambda x: x[2])
 
             wall_high = with_wall[0][3]
-            cross_sign = row_directions.get(with_wall[0][0], 1)
-            # Row's mean inner face for consistent spine position
             row_cross = sum(r["center"][cross_axis] for _, r, _, _ in with_wall) / len(with_wall)
             mean_half = sum(r["size"][cross_axis] / 2 for _, r, _, _ in with_wall) / len(with_wall)
-            row_inner = row_cross + cross_sign * mean_half
 
-            for step_i, (idx, r, wall_dist, _wall_coord) in enumerate(with_wall):
-                c = r["center"]
-                sz = r["size"]
-                ann_z = c[2] if self.use_item_z else 0.0
-                rack_far = c[axis] + sz[axis] / 2
-                rack_inner = c[cross_axis] + cross_sign * sz[cross_axis] / 2
+            # Same direction as dimension brackets (from side_from_wall_b)
+            wall_side_sign = row_directions.get(with_wall[0][0], 1)
+            row_wall_face = row_cross + wall_side_sign * mean_half
 
-                # Stagger: each rack at increasing offset from inner face
-                bracket_cross = row_inner + cross_sign * (
-                    self._WALL_DIST_OFFSET + step_i * 0.08)
-
-                if axis == 1:
-                    edge_a = [bracket_cross, rack_far, ann_z]
-                    edge_b = [bracket_cross, wall_high, ann_z]
-                    anchor_a = [rack_inner, rack_far, ann_z]
-                    anchor_b = [bracket_cross, wall_high, ann_z]
-                    tick_dir = [cross_sign * 0.03, 0, 0]
-                else:
-                    edge_a = [rack_far, bracket_cross, ann_z]
-                    edge_b = [wall_high, bracket_cross, ann_z]
-                    anchor_a = [rack_far, rack_inner, ann_z]
-                    anchor_b = [wall_high, bracket_cross, ann_z]
-                    tick_dir = [0, cross_sign * 0.03, 0]
-
-                gaps.append(GapItem(
-                    edge_a, edge_b, wall_dist, axis, True,
-                    anchor_a=anchor_a, anchor_b=anchor_b,
-                    tick_dir=tick_dir,
-                    color=self.wall_dist_color,
-                    category=self.category,
-                    label_t=0.05,
-                ))
-
-            # Spine at wall_high connecting all bracket tips
-            n = len(with_wall)
-            # Use mean Z of row items for spine
-            spine_z = (sum(r["center"][2] for _, r, _, _ in with_wall)
-                       / len(with_wall)) if self.use_item_z else 0.0
-            inner_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
-            outer_cross = row_inner + cross_sign * (
-                self._WALL_DIST_OFFSET + (n - 1) * 0.08)
-            if axis == 1:
-                spine_a = [inner_cross, wall_high, spine_z]
-                spine_b = [outer_cross, wall_high, spine_z]
+            if self.wall_dist_style == WallDistStyle.COMB:
+                comb_gaps, comb_planes = self._build_wall_dist_comb(
+                    with_wall, idx_to_bbox, axis, cross_axis,
+                    wall_side_sign, row_wall_face, wall_high)
+                gaps.extend(comb_gaps)
+                planes.extend(comb_planes)
             else:
-                spine_a = [wall_high, inner_cross, spine_z]
-                spine_b = [wall_high, outer_cross, spine_z]
-            gaps.append(GapItem(
-                spine_a, spine_b, None, cross_axis, True,
-                anchor_a=spine_a, anchor_b=spine_b,
-                tick_dir=[0, 0, 0],
+                gaps.extend(self._build_wall_dist_staggered(
+                    with_wall, idx_to_bbox, axis, cross_axis,
+                    wall_side_sign, row_wall_face, wall_high))
+
+        return bboxes, gaps, planes
+
+    def _build_wall_dist_staggered(self, with_wall, idx_to_bbox, axis,
+                                    cross_axis, cross_sign, row_inner, wall_high):
+        """Staggered style: one parallel line per item, offset from each other."""
+        gaps = []
+        for step_i, (idx, r, wall_dist, _wc) in enumerate(with_wall):
+            c = r["center"]
+            sz = r["size"]
+            ann_z = c[2] if self.use_item_z else 0.0
+            rack_far = c[axis] + sz[axis] / 2
+            rack_inner = c[cross_axis] + cross_sign * sz[cross_axis] / 2
+            bracket_cross = row_inner + cross_sign * (
+                self._WALL_DIST_OFFSET + step_i * 0.08)
+
+            if axis == 1:
+                edge_a = [bracket_cross, rack_far, ann_z]
+                edge_b = [bracket_cross, wall_high, ann_z]
+                anchor_a = [rack_inner, rack_far, ann_z]
+                anchor_b = [bracket_cross, wall_high, ann_z]
+                tick_dir = [cross_sign * 0.03, 0, 0]
+            else:
+                edge_a = [rack_far, bracket_cross, ann_z]
+                edge_b = [wall_high, bracket_cross, ann_z]
+                anchor_a = [rack_far, rack_inner, ann_z]
+                anchor_b = [wall_high, bracket_cross, ann_z]
+                tick_dir = [0, cross_sign * 0.03, 0]
+
+            wall_gap = GapItem(
+                edge_a, edge_b, wall_dist, axis, True,
+                anchor_a=anchor_a, anchor_b=anchor_b,
+                tick_dir=tick_dir,
                 color=self.wall_dist_color,
                 category=self.category,
-            ))
+                label_t=0.05,
+            )
+            wall_gap.measurement_type = MeasurementType.WALL_DISTANCE
+            owner = idx_to_bbox.get(idx)
+            if owner:
+                wall_gap.parent_bboxes = [owner]
+            gaps.append(wall_gap)
 
-        return bboxes, gaps
+        # Spine at wall_high connecting all bracket tips
+        n = len(with_wall)
+        spine_z = (sum(r["center"][2] for _, r, _, _ in with_wall)
+                   / len(with_wall)) if self.use_item_z else 0.0
+        inner_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
+        outer_cross = row_inner + cross_sign * (
+            self._WALL_DIST_OFFSET + (n - 1) * 0.08)
+        if axis == 1:
+            spine_a = [inner_cross, wall_high, spine_z]
+            spine_b = [outer_cross, wall_high, spine_z]
+        else:
+            spine_a = [wall_high, inner_cross, spine_z]
+            spine_b = [wall_high, outer_cross, spine_z]
+        spine = GapItem(
+            spine_a, spine_b, None, cross_axis, True,
+            anchor_a=spine_a, anchor_b=spine_b,
+            tick_dir=[0, 0, 0],
+            color=self.wall_dist_color,
+            category=self.category,
+        )
+        spine.measurement_type = MeasurementType.WALL_DISTANCE
+        spine.parent_bboxes = [
+            b for b in [idx_to_bbox.get(idx) for idx, _, _, _ in with_wall] if b]
+        gaps.append(spine)
+        return gaps
+
+    def _build_wall_dist_comb(self, with_wall, idx_to_bbox, axis,
+                               cross_axis, cross_sign, row_inner, wall_high):
+        """Comb style: central spine along corridor, cross-axis ticks to item projections.
+
+        Layout (for axis=1, Y=corridor, X=cross):
+          - Spine: vertical line along corridor axis (Y) at a central X,
+            from first to last item Y position
+          - Ticks: horizontal lines from spine to each item's X position,
+            at that item's Y — labeled with wall distance
+          - Projections: short corridor-axis bars at each item's floor
+            footprint showing the projected item outline
+          - Planes: semi-transparent floor quads from item side to spine
+        """
+        gaps = []
+        planes = []
+        all_parents = [b for b in [idx_to_bbox.get(idx) for idx, _, _, _ in with_wall] if b]
+
+        # Spine X position: offset from row inner face into the corridor
+        spine_cross = row_inner + cross_sign * self._WALL_DIST_OFFSET
+
+        # Spine extent: from wall to farthest item from wall
+        item_positions = []
+        for _, r, _, _ in with_wall:
+            c = r["center"]
+            sz = r["size"]
+            item_positions.append(c[axis] - sz[axis] / 2)
+            item_positions.append(c[axis] + sz[axis] / 2)
+        # Find the item edge farthest from wall_high
+        farthest = max(item_positions, key=lambda p: abs(p - wall_high))
+        spine_start = wall_high
+        spine_end = farthest
+        spine_z = (sum(r["center"][2] for _, r, _, _ in with_wall)
+                   / len(with_wall)) if self.use_item_z else 0.0
+
+        # Spine: runs along corridor axis at spine_cross
+        if axis == 1:
+            spine_a = [spine_cross, spine_start, spine_z]
+            spine_b = [spine_cross, spine_end, spine_z]
+        else:
+            spine_a = [spine_start, spine_cross, spine_z]
+            spine_b = [spine_end, spine_cross, spine_z]
+        spine = GapItem(
+            spine_a, spine_b, None, axis, True,
+            anchor_a=spine_a, anchor_b=spine_b,
+            tick_dir=[0, 0, 0],
+            color=self.wall_dist_color,
+            category=self.category,
+        )
+        spine.measurement_type = MeasurementType.WALL_DISTANCE
+        spine.parent_bboxes = list(all_parents)
+        gaps.append(spine)
+
+        for idx, r, wall_dist, _wc in with_wall:
+            c = r["center"]
+            sz = r["size"]
+            item_cross = c[cross_axis]
+            item_corridor = c[axis]
+            ann_z = c[2] if self.use_item_z else 0.0
+
+            half_cross = sz[cross_axis] / 2
+            half_corridor = sz[axis] / 2
+            item_near_edge = item_cross + cross_sign * half_cross
+
+            # Edge of MTS box closest to the measurement wall
+            if wall_high >= item_corridor:
+                item_wall_edge = item_corridor + half_corridor
+            else:
+                item_wall_edge = item_corridor - half_corridor
+
+            # Tick: from spine to near edge of item projection bar
+            if axis == 1:
+                edge_a = [spine_cross, item_wall_edge, ann_z]
+                edge_b = [item_near_edge, item_wall_edge, ann_z]
+                tick_dir = [0, 0, 0.03]
+            else:
+                edge_a = [item_wall_edge, spine_cross, ann_z]
+                edge_b = [item_wall_edge, item_near_edge, ann_z]
+                tick_dir = [0, 0, 0.03]
+
+            tick = GapItem(
+                edge_a, edge_b, wall_dist, cross_axis, True,
+                anchor_a=edge_a, anchor_b=edge_b,
+                tick_dir=tick_dir,
+                color=self.wall_dist_color,
+                category=self.category,
+                label_t=0.5,
+            )
+            tick.measurement_type = MeasurementType.WALL_DISTANCE
+            owner = idx_to_bbox.get(idx)
+            if owner:
+                tick.parent_bboxes = [owner]
+            gaps.append(tick)
+
+            # Projection: item wall face projected on floor at wall edge
+            if axis == 1:
+                proj_a = [item_cross - half_cross, item_wall_edge, ann_z]
+                proj_b = [item_cross + half_cross, item_wall_edge, ann_z]
+            else:
+                proj_a = [item_wall_edge, item_cross - half_cross, ann_z]
+                proj_b = [item_wall_edge, item_cross + half_cross, ann_z]
+            proj = GapItem(
+                proj_a, proj_b, None, cross_axis, True,
+                anchor_a=proj_a, anchor_b=proj_b,
+                tick_dir=[0, 0, 0],
+                color=self.bbox_color,
+                category=self.category,
+            )
+            proj.measurement_type = MeasurementType.WALL_DISTANCE
+            if owner:
+                proj.parent_bboxes = [owner]
+            gaps.append(proj)
+
+            # Vertical plane: rises from floor to bottom of the box
+            box_bottom = c[2] - sz[2] / 2
+            if axis == 1:
+                plane = PlaneItem(
+                    axis='xz',
+                    center=[item_cross - half_cross, item_wall_edge, 0.0],
+                    size=[sz[cross_axis], box_bottom],
+                    color=list(self.bbox_color),
+                    opacity=0.15,
+                )
+            else:
+                plane = PlaneItem(
+                    axis='yz',
+                    center=[item_wall_edge, item_cross - half_cross, 0.0],
+                    size=[sz[cross_axis], box_bottom],
+                    color=list(self.bbox_color),
+                    opacity=0.15,
+                )
+            planes.append(plane)
+
+        return gaps, planes
 
 
 def _detect_corridor_axis(items, pairs):
@@ -387,9 +572,7 @@ def _get_wall_distance(rack_data, axis):
 
 
 class RackMetadataHandler(MetadataHandler):
-    """Parse rack_N_metadata.yaml files into bbox + gap annotations."""
-
-    file_pattern = "rack_*_metadata.yaml"
+    kind = "rack"
     category = AnnotationCategory.RACK
     display_name = "Racks"
     bbox_color = (1.0, 0.5, 0.0)       # orange
@@ -398,9 +581,7 @@ class RackMetadataHandler(MetadataHandler):
 
 
 class EmptySpaceMetadataHandler(MetadataHandler):
-    """Parse empty_N_metadata.yaml files into bbox + gap annotations."""
-
-    file_pattern = "empty_*_metadata.yaml"
+    kind = "empty_space"
     category = AnnotationCategory.EMPTY_SPACE
     display_name = "Empty Spaces"
     bbox_color = (0.2, 0.4, 1.0)       # blue
@@ -408,31 +589,46 @@ class EmptySpaceMetadataHandler(MetadataHandler):
     neighbor_index_key = "empty_index"
 
 
-class MtsMetadataHandler(MetadataHandler):
-    """Parse mts_stack_N_metadata.yaml files into bbox + gap annotations."""
+class RackRegionMetadataHandler(MetadataHandler):
+    kind = "region_subzone"
+    category = AnnotationCategory.REGION_SUBZONE
+    display_name = "Rack Regions"
+    bbox_color = (0.5, 0.5, 0.5)       # grey
+    gap_color = (0.4, 0.4, 0.4)
+    neighbor_index_key = "region_index"
+    enabled_measurements = frozenset()  # bboxes only
 
-    file_pattern = "mts_stack_*_metadata.yaml"
+
+class MtsMetadataHandler(MetadataHandler):
+    kind = "mts_stack"
     category = AnnotationCategory.MTS
     display_name = "MTS Stacks"
     bbox_color = (1.0, 0.8, 0.2)       # yellow
     gap_color = (0.9, 0.6, 0.1)        # darker gold
     neighbor_index_key = "mts_index"
-    use_item_z = True
+    wall_dist_style = WallDistStyle.COMB
+    enabled_measurements = frozenset({
+        MeasurementType.NEIGHBOR,
+        MeasurementType.WALL_DISTANCE,
+    })
 
 
 class MtsBoxMetadataHandler(MetadataHandler):
-    """Parse mts_box_N_M_metadata.yaml files into bbox + gap annotations.
-
-    MTS boxes are vertically stacked (Z-axis neighbors) with no wall distances.
-    Only bboxes and width annotations are produced; vertical neighbor gaps
-    are skipped since the bracket renderer works in X/Y.
-    """
-
-    file_pattern = "mts_box_*_metadata.yaml"
+    kind = "mts_box"
     category = AnnotationCategory.MTS_BOX
     display_name = "MTS Boxes"
-    bbox_color = (0.2, 0.8, 1.0)       # cyan (matches metadata color)
+    bbox_color = (0.2, 0.8, 1.0)       # cyan
     gap_color = (0.1, 0.6, 0.9)        # darker cyan
     neighbor_index_key = "mts_box_index"
     use_item_z = True
-    skip_neighbor_gaps = True  # neighbors are vertical (Z-axis)
+    enabled_measurements = frozenset({MeasurementType.DIMENSION})
+
+
+# Registry: kind → handler instance
+METADATA_HANDLERS = {h.kind: h for h in [
+    RackMetadataHandler(),
+    EmptySpaceMetadataHandler(),
+    RackRegionMetadataHandler(),
+    MtsMetadataHandler(),
+    MtsBoxMetadataHandler(),
+]}

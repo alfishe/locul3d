@@ -28,7 +28,7 @@ from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
 from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, PlaneItem
-from ..utils.metadata import RackMetadataHandler, EmptySpaceMetadataHandler, MtsMetadataHandler, MtsBoxMetadataHandler
+from ..utils.metadata import load_all_metadata, METADATA_HANDLERS
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -750,7 +750,7 @@ class EditorWindow(QMainWindow):
         self._detect_metadata(folder_path, append=True)
         n_groups = len(self.layer_panel.annotation_groups)
         if n_groups:
-            n_items = sum(len(g["items"]) for g in self.layer_panel.annotation_groups)
+            n_items = sum(len(g["bboxes"]) + len(g["measurements"]) for g in self.layer_panel.annotation_groups)
             self.status_label.setText(
                 f"Loaded metadata: {n_groups} group(s), {n_items} items from {folder_path.name}")
         else:
@@ -759,18 +759,23 @@ class EditorWindow(QMainWindow):
     def _detect_metadata(self, folder_path: Path, append: bool = False):
         """Auto-detect and load metadata files from a folder.
 
+        Reads all *_metadata.yaml, groups by 'kind', dispatches to handlers.
+
         Args:
             append: If True, add to existing annotations. If False, replace them.
         """
         new_bboxes = []
         new_gaps = []
+        new_planes = []
         new_groups = []
 
-        for handler in self._metadata_handlers:
-            if not handler.detect(folder_path):
+        kind_groups = load_all_metadata(folder_path)
+        for kind, items in kind_groups.items():
+            handler = METADATA_HANDLERS.get(kind)
+            if handler is None:
                 continue
             try:
-                bboxes, gaps = handler.parse(folder_path)
+                bboxes, gaps, planes = handler.parse(items)
             except Exception:
                 continue
             if not bboxes and not gaps:
@@ -778,14 +783,16 @@ class EditorWindow(QMainWindow):
 
             for bbox in bboxes:
                 bbox.scene_coords = True
-            new_bboxes.extend(bboxes)
+            # Bboxes kept in groups for per-item toggles but not rendered
             new_gaps.extend(gaps)
+            new_planes.extend(planes)
 
-            items = list(bboxes) + list(gaps)
             new_groups.append({
                 "name": handler.display_name,
-                "color": items[0].color,
-                "items": items,
+                "color": bboxes[0].color if bboxes else gaps[0].color,
+                "bboxes": list(bboxes),
+                "measurements": list(gaps),
+                "planes": list(planes),
             })
 
         if not new_bboxes and not new_gaps:
@@ -797,6 +804,7 @@ class EditorWindow(QMainWindow):
             self.gl_viewport.scene_bboxes.extend(new_bboxes)
             self.gap_items.extend(new_gaps)
             self.gl_viewport.gaps = self.gap_items
+            self.planes.extend(new_planes)
             self.layer_panel.annotation_groups.extend(new_groups)
         else:
             # Replace previous pipeline annotations (mutate in-place to
@@ -807,6 +815,7 @@ class EditorWindow(QMainWindow):
             self.gl_viewport.scene_bboxes = new_bboxes
             self.gap_items = new_gaps
             self.gl_viewport.gaps = new_gaps
+            self.planes.extend(new_planes)
             self.layer_panel.annotation_groups = new_groups
 
         self.bbox_panel.rebuild_list()
@@ -854,13 +863,13 @@ class EditorWindow(QMainWindow):
             es_gaps = [g for g in gaps if g.category is AnnotationCategory.EMPTY_SPACE]
             groups = []
             if rack_bboxes or rack_gaps:
-                items = rack_bboxes + rack_gaps
-                groups.append({"name": "Racks", "color": items[0].color,
-                               "items": items})
+                groups.append({"name": "Racks",
+                               "color": (rack_bboxes or rack_gaps)[0].color,
+                               "bboxes": rack_bboxes, "measurements": rack_gaps})
             if es_bboxes or es_gaps:
-                items = es_bboxes + es_gaps
-                groups.append({"name": "Empty Spaces", "color": items[0].color,
-                               "items": items})
+                groups.append({"name": "Empty Spaces",
+                               "color": (es_bboxes or es_gaps)[0].color,
+                               "bboxes": es_bboxes, "measurements": es_gaps})
             self.layer_panel.annotation_groups = groups
             self.layer_panel.rebuild()
 
@@ -878,7 +887,6 @@ class EditorWindow(QMainWindow):
     _RACK_GAP_ANNOT = (0.0, 0.85, 0.85)  # cyan — contrasts orange
     _EMPTY_GAP_ANNOT = (0.2, 0.9, 0.2)   # green — contrasts red
 
-    _metadata_handlers = [RackMetadataHandler(), EmptySpaceMetadataHandler(), MtsMetadataHandler(), MtsBoxMetadataHandler()]
 
     def _parse_pipeline_context(self, data):
         """Parse pipeline_context.yaml → (list[BBoxItem], list[GapItem]).

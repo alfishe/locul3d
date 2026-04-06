@@ -449,19 +449,49 @@ class EditorViewport(BaseGLViewport):
         glEnable(GL_LIGHTING)
 
     def _draw_scene_bboxes(self):
-        """Draw pipeline bboxes in scene (post-correction) coordinates."""
+        """Draw pipeline bboxes in scene (post-correction) coordinates.
+
+        Each bbox's fill_opacity controls surface fill:
+          0   → wireframe only
+          >0  → semi-transparent filled faces + solid wireframe edges
+        """
         visible = [b for b in self.scene_bboxes if b.visible]
         if not visible:
             return
         try:
             from OpenGL.GL import (glDisable, glEnable, glLineWidth, glBegin, glEnd,
-                                   GL_DEPTH_TEST)
+                                   GL_DEPTH_TEST, GL_BLEND, glBlendFunc,
+                                   GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                                   glDepthMask, GL_FALSE, GL_TRUE)
         except ImportError:
             return
 
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
 
+        # --- Pass 1: Filled faces ---
+        has_fills = any(b.fill_opacity > 0 for b in visible)
+        if has_fills:
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDepthMask(GL_FALSE)
+
+            for bbox in visible:
+                if bbox.fill_opacity <= 0:
+                    continue
+                r, g, b = bbox.color[:3]
+                glColor4f(r, g, b, bbox.fill_opacity)
+                corners = bbox.corners()
+                for face in AABB_FACES:
+                    glBegin(GL_QUADS)
+                    for vi in face:
+                        glVertex3dv(corners[vi])
+                    glEnd()
+
+            glDepthMask(GL_TRUE)
+            glDisable(GL_BLEND)
+
+        # --- Pass 2: Wireframe edges (always solid) ---
         for bbox in visible:
             glLineWidth(3.0)
             r, g, b = bbox.color[:3]
@@ -523,21 +553,23 @@ class EditorViewport(BaseGLViewport):
                 barb = np.array([0, 0, arrow_sz * 0.5])
 
             glBegin(GL_LINES)
-            # Tick A: from anchor through edge to extended
-            glVertex3dv(a_extended)
-            glVertex3dv(gap.anchor_a)
-            # Tick B
-            glVertex3dv(b_extended)
-            glVertex3dv(gap.anchor_b)
-            # Arrow shaft
+            if gap.gap_mm is not None:
+                # Tick A: from anchor through edge to extended
+                glVertex3dv(a_extended)
+                glVertex3dv(gap.anchor_a)
+                # Tick B
+                glVertex3dv(b_extended)
+                glVertex3dv(gap.anchor_b)
+            # Shaft
             glVertex3dv(a)
             glVertex3dv(b)
-            # Arrowhead A
-            glVertex3dv(a); glVertex3dv(a + d_arrow + barb)
-            glVertex3dv(a); glVertex3dv(a + d_arrow - barb)
-            # Arrowhead B
-            glVertex3dv(b); glVertex3dv(b - d_arrow + barb)
-            glVertex3dv(b); glVertex3dv(b - d_arrow - barb)
+            if gap.gap_mm is not None:
+                # Arrowhead A
+                glVertex3dv(a); glVertex3dv(a + d_arrow + barb)
+                glVertex3dv(a); glVertex3dv(a + d_arrow - barb)
+                # Arrowhead B
+                glVertex3dv(b); glVertex3dv(b - d_arrow + barb)
+                glVertex3dv(b); glVertex3dv(b - d_arrow - barb)
             glEnd()
 
         glEnable(GL_DEPTH_TEST)

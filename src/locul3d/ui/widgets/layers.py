@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor, QColor, QMouseEvent
 
 from ...core.layer import LayerData, LayerManager
+from ...core.geometry import MeasurementType
 from ...core.constants import COLORS
 
 
@@ -207,67 +208,197 @@ class LayerRowWidget(QFrame):
 
 
 class AnnotationRowWidget(QFrame):
-    """Simplified row for toggling visibility of an annotation group."""
+    """Expandable row for toggling visibility of an annotation group.
+
+    Group dict: {"name": str, "color": [r,g,b], "bboxes": list, "measurements": list}
+    Clicking the row expands to show per-bbox child checkboxes.
+    """
 
     visibility_changed = Signal()
 
     def __init__(self, group: dict, parent=None):
         super().__init__(parent)
-        self.group = group  # {"name": str, "color": [r,g,b], "items": list}
+        self.group = group
+        self._expanded = False
+        self._child_checkboxes = []
 
         self.setFrameShape(QFrame.Shape.NoFrame)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(4)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # Visibility checkbox
+        # --- Header row ---
+        header = QFrame()
+        header.setFrameShape(QFrame.Shape.NoFrame)
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(4, 2, 4, 2)
+        header_layout.setSpacing(4)
+
+        # Visibility checkbox — sync from actual item state
+        all_bboxes = group.get("bboxes", [])
+        all_visible = all(b.visible for b in all_bboxes) if all_bboxes else True
         self.checkbox = QCheckBox()
-        self.checkbox.setChecked(True)
-        self.checkbox.setToolTip("Show/Hide")
-        self.checkbox.setStyleSheet(f"""
-            QCheckBox::indicator {{
-                width: 14px; height: 14px;
-                border: 2px solid {COLORS['border']};
-                border-radius: 3px;
-            }}
-            QCheckBox::indicator:checked {{
-                background: {COLORS['accent']};
-                border-color: {COLORS['accent']};
-            }}
-            QCheckBox::indicator:unchecked {{
-                background: {COLORS['input_bg']};
-            }}
-        """)
-        self.checkbox.toggled.connect(self._on_visibility)
-        layout.addWidget(self.checkbox)
+        self.checkbox.setChecked(all_visible)
+        self.checkbox.setToolTip("Show/Hide all")
+        self.checkbox.toggled.connect(self._on_group_visibility)
+        header_layout.addWidget(self.checkbox)
 
-        # Color swatch (display-only)
-        swatch = QLabel()
-        swatch.setFixedSize(16, 12)
-        r, g, b = [int(c * 255) for c in group["color"][:3]]
-        swatch.setStyleSheet(
-            f"background: rgb({r},{g},{b}); border: 1px solid {COLORS['swatch_border']};"
-            f" border-radius: 3px;"
-        )
-        layout.addWidget(swatch)
+        # Color swatch — clickable to open color picker
+        self._swatch = _ClickableLabel()
+        self._swatch.setFixedSize(16, 12)
+        self._swatch.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._swatch.setToolTip("Click to change annotation color")
+        self._swatch.clicked.connect(self._on_swatch_clicked)
+        self._update_swatch()
+        header_layout.addWidget(self._swatch)
 
-        # Name with count
-        count = len(group["items"])
-        label = QLabel(f"{group['name']} ({count})")
+        # Expand arrow + name with count
+        bboxes = group.get("bboxes", [])
+        self._arrow = QLabel("▶")
+        self._arrow.setFixedWidth(12)
+        self._arrow.setStyleSheet(f"color: {COLORS['text']}; font-size: 10px;")
+        header_layout.addWidget(self._arrow)
+
+        label = QLabel(f"{group['name']} ({len(bboxes)})")
         label.setMinimumWidth(60)
         label.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
         )
-        layout.addWidget(label, stretch=1)
+        header_layout.addWidget(label, stretch=1)
+        outer.addWidget(header)
+        self._header = header
+
+        # --- Child container (hidden by default) ---
+        self._child_container = QWidget()
+        self._child_container.setVisible(False)
+        self._child_layout = QVBoxLayout(self._child_container)
+        self._child_layout.setContentsMargins(24, 0, 4, 0)
+        self._child_layout.setSpacing(1)
+        outer.addWidget(self._child_container)
+
+    def mousePressEvent(self, event):
+        """Toggle expand/collapse on click (but not on checkbox)."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Map checkbox rect into AnnotationRowWidget coordinate space
+            cb_rect = self.checkbox.rect()
+            cb_topLeft = self.checkbox.mapTo(self, cb_rect.topLeft())
+            from PySide6.QtCore import QRect
+            cb_in_self = QRect(cb_topLeft, cb_rect.size())
+            if not cb_in_self.contains(event.pos()):
+                self._toggle_expand()
+        super().mousePressEvent(event)
+
+    def _toggle_expand(self):
+        self._expanded = not self._expanded
+        self._arrow.setText("▼" if self._expanded else "▶")
+        if self._expanded and not self._child_checkboxes:
+            self._build_children()
+        self._child_container.setVisible(self._expanded)
+
+    def _build_children(self):
+        """Lazily create per-bbox child checkboxes."""
+        bboxes = self.group.get("bboxes", [])
+        gaps = self.group.get("measurements", [])
+        for i, bbox in enumerate(bboxes):
+            row = QFrame()
+            row.setFrameShape(QFrame.Shape.NoFrame)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 1, 0, 1)
+            row_layout.setSpacing(4)
+
+            cb = QCheckBox()
+            cb.setChecked(bbox.visible)
+            cb.setToolTip("Show/Hide")
+            cb.toggled.connect(lambda checked, b=bbox, g=gaps: self._on_item_visibility(checked, b, g))
+            row_layout.addWidget(cb)
+
+            name = bbox.label
+            lbl = QLabel(name)
+            lbl.setMinimumWidth(40)
+            lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            row_layout.addWidget(lbl, stretch=1)
+
+            self._child_layout.addWidget(row)
+            self._child_checkboxes.append(cb)
 
     def set_visible(self, visible: bool):
         """Programmatically set visibility (e.g. from Show/Hide All)."""
         self.checkbox.setChecked(visible)
+        # Ensure visibility is applied even if checkbox state didn't change
+        self._on_group_visibility(visible)
 
-    def _on_visibility(self, checked: bool):
-        for item in self.group["items"]:
-            item.visible = checked
+    def _on_group_visibility(self, checked: bool):
+        """Toggle all bboxes + gaps + planes in the group."""
+        for bbox in self.group.get("bboxes", []):
+            bbox.visible = checked
+        for gap in self.group.get("measurements", []):
+            gap.visible = checked
+        for plane in self.group.get("planes", []):
+            plane.visible = checked
+        # Sync child checkboxes
+        for cb in self._child_checkboxes:
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+        self.visibility_changed.emit()
+
+    def _on_item_visibility(self, checked: bool, bbox, gaps):
+        """Toggle a single bbox and its owned measurements."""
+        bbox.visible = checked
+        for gap in gaps:
+            if bbox in gap.parent_bboxes:
+                if len(gap.parent_bboxes) == 1:
+                    # Owned gap (width/wall): follows its single parent
+                    gap.visible = checked
+                else:
+                    # Shared gap (neighbor/spine): visible if any parent is visible
+                    gap.visible = any(b.visible for b in gap.parent_bboxes)
+        self.visibility_changed.emit()
+
+    def _update_swatch(self):
+        """Update swatch color from group color."""
+        r, g, b = [int(c * 255) for c in self.group["color"][:3]]
+        self._swatch.setStyleSheet(
+            f"background: rgb({r},{g},{b}); border: 1px solid {COLORS['swatch_border']};"
+            f" border-radius: 3px;"
+        )
+
+    @staticmethod
+    def _contrasting_color(r, g, b):
+        """Compute a high-contrast measurement color for a given bbox color.
+
+        Rotates hue by 180° (complementary) and boosts saturation/value.
+        """
+        from colorsys import rgb_to_hsv, hsv_to_rgb
+        h, s, v = rgb_to_hsv(r, g, b)
+        h = (h + 0.5) % 1.0       # complementary hue
+        s = max(s, 0.7)            # ensure saturated
+        v = max(v, 0.8)            # ensure bright
+        return hsv_to_rgb(h, s, v)
+
+    def _on_swatch_clicked(self):
+        """Open color picker and apply to all bboxes + measurement gaps.
+
+        Wall distance measurements keep their color — only dimension
+        and neighbor measurements get the contrasting color.
+        """
+        from PySide6.QtWidgets import QColorDialog
+        r, g, b = [int(c * 255) for c in self.group["color"][:3]]
+        color = QColorDialog.getColor(QColor(r, g, b), self, "Annotation Color")
+        if not color.isValid():
+            return
+        new_color = [color.redF(), color.greenF(), color.blueF()]
+        gap_color = self._contrasting_color(*new_color)
+        self.group["color"] = new_color
+        for bbox in self.group.get("bboxes", []):
+            bbox.color = list(new_color)
+        for gap in self.group.get("measurements", []):
+            if gap.measurement_type == MeasurementType.WALL_DISTANCE:
+                continue
+            gap.color = tuple(gap_color)
+        self._update_swatch()
         self.visibility_changed.emit()
 
 
