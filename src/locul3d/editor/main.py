@@ -33,6 +33,13 @@ def main():
                         help="Scene correction shift along Y axis (scene units)")
     parser.add_argument("--shift-z", type=float, default=0.0,
                         help="Scene correction shift along Z axis (scene units)")
+    # Remote API options
+    parser.add_argument("--api-port", type=int, default=8350,
+                        help="Remote API server port (default: 8350)")
+    parser.add_argument("--no-api", action="store_true",
+                        help="Disable the Remote API server")
+    parser.add_argument("--api-host", type=str, default="127.0.0.1",
+                        help="Remote API bind address (default: 127.0.0.1)")
     args = parser.parse_args()
 
     correction = {
@@ -51,6 +58,19 @@ def main():
         correction_angles=correction if has_correction else None,
     )
     window.show()
+
+    # Start Remote API server (unless disabled)
+    if not args.no_api:
+        try:
+            from locul3d.remote import start_server
+            window._remote_server = start_server(
+                window=window,
+                port=args.api_port,
+                host=args.api_host,
+            )
+        except ImportError:
+            pass  # remote package not installed
+
     sys.exit(app.exec())
 
 

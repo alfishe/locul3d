@@ -149,7 +149,7 @@ class AnimationEngine(QObject):
     # ── Camera Animate ───────────────────────────────────────────────
 
     def _cmd_camera_animate(self, data: dict) -> dict:
-        track_id = data.get("id", "camera-anim")
+        track_id = data.get("track_id") or data.get("id", "camera-anim")
         keyframes = data.get("keyframes", [])
         duration_ms = data.get("duration_ms", 3000)
         easing_spec = data.get("easing", "ease_in_out")
@@ -194,7 +194,7 @@ class AnimationEngine(QObject):
     # ── Camera Continuous Transform ──────────────────────────────────
 
     def _cmd_camera_continuous(self, data: dict) -> dict:
-        track_id = data.get("id", "camera-continuous")
+        track_id = data.get("track_id") or data.get("id", "camera-continuous")
         prop = data.get("property", "azimuth")
         rate = data.get("rate", 0.0)
         target = data.get("target")
@@ -242,7 +242,7 @@ class AnimationEngine(QObject):
     # ── Dynamic Layer Animate ────────────────────────────────────────
 
     def _cmd_dynamic_animate(self, data: dict) -> dict:
-        track_id = data.get("id", "layer-anim")
+        track_id = data.get("track_id") or data.get("id", "layer-anim")
         layer_id = data.get("layer_id")
         if not layer_id:
             raise ValueError("layer_id required")
@@ -301,7 +301,7 @@ class AnimationEngine(QObject):
     # ── Dynamic Layer Continuous Transform ────────────────────────────
 
     def _cmd_dynamic_continuous(self, data: dict) -> dict:
-        track_id = data.get("id", "layer-continuous")
+        track_id = data.get("track_id") or data.get("id", "layer-continuous")
         layer_id = data.get("layer_id")
         if not layer_id:
             raise ValueError("layer_id required")
@@ -382,7 +382,7 @@ class AnimationEngine(QObject):
     # ── Stop Commands ────────────────────────────────────────────────
 
     def _cmd_stop(self, data: dict) -> dict:
-        track_id = data.get("id")
+        track_id = data.get("track_id") or data.get("id")
         if not track_id:
             raise ValueError("id required")
         removed = self.remove_track(track_id)
