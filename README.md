@@ -18,6 +18,10 @@
 | 📦 **3D Annotation Layouts** | Place, move, and resize reference boxes with center+size or min/max corners — toggle between modes with one click |
 | 🗂️ **Multi-Layer Scene** | Load point clouds, meshes, and annotations from separate files (PLY, OBJ, E57) into a single scene — control visibility and opacity per layer |
 | ✂️ **Scene Clipping** | Inspect scene bounds, hide ceiling with one click, clip to any axis-aligned region — all via GL clip planes (no data copies) |
+| 🛰️ **Remote Control API** | REST + WebSocket on `localhost:8350` — scripted camera animation, layer control, point cloud streaming. Available in both viewer and editor. |
+| 🎬 **Video Recording** | Capture the viewport to mp4 (H.264 or HEVC) with platform-native HW acceleration (videotoolbox / NVENC / QSV / AMF / VAAPI), software fallback to libx264/libx265, 4K UHD by default |
+| 🌫️ **Cone-Shadow Shader Fade** | GLSL 1.20 occluder fade — points between camera and an "area of interest" bounding sphere fade to expose the AoI without dimming the rest of the scene |
+| ⏱️ **Adaptive FPS Renderer** | Closed-loop controller throttles realtime FPS based on real GPU paint time (GL_TIME_ELAPSED queries) and slows the animation clock proportionally — slow scenes look smooth instead of jumpy |
 | 🌗 **Auto Dark/Light Theme** | Follows your OS appearance automatically |
 | ⌨️ **Blender-style Shortcuts** | Q/G/R/S for tools, X/Y/Z for axis constraints |
 | ↩️ **Undo/Redo** | Full undo stack for annotation work |
@@ -310,6 +314,226 @@ The **Scene** toolbar button (available in both Viewer and Editor) opens a non-m
 - **Reset** — Removes all clipping and restores the full scene.
 
 Clipping uses OpenGL clip planes — **no point data is copied or modified**.
+
+---
+
+## 🛰️ Remote Control API
+
+Locul3D exposes a REST + WebSocket API on `http://localhost:8350` (default
+port) for scripting and automation. The server starts automatically with
+both the **viewer** and the **editor** unless `--no-api` is passed.
+
+### CLI flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--api-port PORT` | `8350` | TCP port the API server binds to |
+| `--api-host HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to expose on the LAN) |
+| `--no-api` | _enabled_ | Disable the API server entirely |
+| `--vsync` / `--no-vsync` | `--no-vsync` | OpenGL swap interval. Vsync OFF lets the adaptive FPS controller see real GPU paint timings; ON caps everything at the display refresh |
+
+### Endpoints (selection)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/system/ping` | Liveness check |
+| `GET` | `/api/v1/openapi.json` | OpenAPI 3.1 schema |
+| `GET` / `PUT` | `/api/v1/camera` | Read or set the orbit camera state |
+| `POST` | `/api/v1/camera/look_at` | Aim camera at a 3D point |
+| `GET` / `PUT` / `DELETE` | `/api/v1/viewport/clip` | AABB scene clipping |
+| `GET` / `PUT` | `/api/v1/viewport/fade` | Cone-shadow shader fade — see below |
+| `GET` / `PUT` | `/api/v1/viewport` | Render settings (`point_size`, `show_grid`, `show_axes`, `bg_color`, `vsync`, …) |
+| `GET` / `POST` / `PUT` / `DELETE` | `/api/v1/shapes/bboxes` | Editor bbox annotations |
+| `POST` | `/api/v1/recording/start` | Start video recording — see below |
+| `POST` | `/api/v1/recording/pause` / `/resume` / `/stop` | Pause / resume / finalize |
+| `GET` | `/api/v1/recording/status` | Live recording state, frames written, bytes |
+| `GET` | `/api/v1/recording/encoders` | Probe ffmpeg + report HW/SW encoder picks |
+
+### WebSocket commands
+
+The WebSocket at `ws://localhost:8350/ws` accepts JSON messages of the
+form `{"type": "...", ...payload}`. Most commands are documented in
+[`doc/architecture/remote-control-api.md`](doc/architecture/remote-control-api.md);
+the new ones added for animation playback control are:
+
+| Type | Payload | Description |
+|---|---|---|
+| `camera.transform_continuous` | `track_id`, `property` (`azimuth`/`elevation`/`distance`/`fov`), `rate`, optional `duration_ms` | Continuous camera motion. Pass `track_id` (the bare `id` field is consumed by the WS layer as a request-correlation id). |
+| `transform.stop` | `track_id` | Stop one named track |
+| `transform.stop_all` | _(none)_ | Stop everything |
+| `animation.set_realtime_fps` | `fps` (ceiling), `min_fps`, `adaptive` | Tune the adaptive FPS controller |
+| `animation.get_realtime_fps` | _(none)_ | Returns `effective_fps`, `paint_peak_ms`, `paint_p80_ms`, `time_scale_active`, … |
+| `animation.set_preview_mode` | `enable`, `target_fps` | Hold target FPS by adapting LOD instead of dropping FPS |
+| `animation.set_time_scale` | `auto`, `nominal_fps`, `scale` | Slow the virtual animation clock when paint cost forces FPS below `nominal_fps` |
+
+### Cone-shadow Shader Fade
+
+`PUT /api/v1/viewport/fade` enables a GLSL 1.20 occluder fade for point
+layers. The fade is a **true cone** swept from the camera through the
+"area of interest" bounding sphere — only points that lie *between* the
+camera and the AoI are dimmed; points off to the side or behind the AoI
+keep their full alpha.
+
+```json
+{
+  "enable": true,
+  "alpha_mul": 0.4,
+  "band": 0.8,
+  "aoi_center": [-1.5, -8.8, 2.8],
+  "aoi_radius": 7.5
+}
+```
+
+| Field | Description |
+|---|---|
+| `enable` | Bool. Disables fall back to fixed-function rendering when `false`. |
+| `alpha_mul` | Alpha multiplier for occluding points (0..1; 0 = invisible, 1 = no fade). |
+| `band` | Smoothstep half-band around the AoI's near edge, in world units. |
+| `aoi_center` | World-space center of the area of interest (3 floats). |
+| `aoi_radius` | Bounding-sphere radius in world units. |
+
+The vertex/fragment shaders are **OpenGL 2.1 compatibility-profile
+GLSL 1.20** — same profile the rest of the renderer uses, no GL upgrade
+required. If shader compilation fails on the driver, the renderer
+silently falls back to the fixed-function path.
+
+### Animation Demo
+
+```bash
+# Start the editor (annotations live there):
+python start.py editor scan.e57
+
+# In a second terminal — orbit the camera around the scene's
+# `search_region` bbox annotation, with cone-shadow fade:
+python scripts/demo_flyover_search_area.py --fade
+
+# Stop it:
+python scripts/demo_flyover_search_area.py --stop
+```
+
+Full flag reference:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--duration N` | `15` | Seconds for one full 360° revolution |
+| `--elevation N` | `25` | Camera elevation angle in degrees |
+| `--margin N` | `1.6` | Distance multiplier on the bbox bounding sphere |
+| `--fov N` | _viewer_ | Override camera FOV |
+| `--clip {none,z,box}` | `z` | Scene clipping. `z` removes ceiling/floor outside the bbox. `box` clips horizontally too. |
+| `--fade` | _off_ | Enable cone-shadow shader fade through the search bbox |
+| `--fade-mul N` | `0.4` | Alpha multiplier for occluders |
+| `--fade-band N` | `0.8` | Smoothstep half-band (m) |
+| `--max-fps N` | `125` | Realtime FPS ceiling for the adaptive controller |
+| `--min-fps N` | `1` | Realtime FPS floor |
+| `--no-adaptive` | _adaptive_ | Disable closed-loop FPS control |
+| `--preview` | _off_ | Hold target FPS, adapt LOD instead of dropping FPS |
+| `--preview-fps N` | `60` | Target FPS for `--preview` |
+| `--no-time-scale` | _auto_ | Disable virtual-clock slowdown |
+| `--nominal-fps N` | `60` | Frame rate the animation is *authored* for |
+| `--stop` | — | Stop a running flyover and exit |
+
+---
+
+## 🎬 Video Recording
+
+Locul3D records the GL viewport to an mp4 file using `ffmpeg` with
+**platform-native HW encoding** wherever possible:
+
+| Platform | H.264 priority | HEVC priority |
+|---|---|---|
+| macOS | `h264_videotoolbox` | `hevc_videotoolbox` |
+| Windows | `h264_nvenc`, `h264_qsv`, `h264_amf` | `hevc_nvenc`, `hevc_qsv`, `hevc_amf` |
+| Linux | `h264_nvenc`, `h264_vaapi`, `h264_qsv` | `hevc_nvenc`, `hevc_vaapi`, `hevc_qsv` |
+| _Software fallback_ | `libx264` | `libx265` |
+
+### Requirements
+
+`ffmpeg` must be on `PATH` (or set `LOCUL3D_FFMPEG=/path/to/ffmpeg`).
+
+```bash
+brew install ffmpeg          # macOS
+apt install ffmpeg           # Debian/Ubuntu
+choco install ffmpeg         # Windows
+```
+
+### Quick reference
+
+```bash
+# Default — current viewport size, 60 fps, HEVC HW (videotoolbox on Mac):
+python scripts/demo_flyover_search_area.py --fade --record fly.mp4
+
+# 4K UHD HEVC, force HW encoder:
+python scripts/demo_flyover_search_area.py --fade --record fly_4k.mp4 \
+       --rec-resolution 4k --rec-codec hevc --rec-hw hw
+
+# 1080p H.264 software (libx264) for portability:
+python scripts/demo_flyover_search_area.py --fade --record fly_sw.mp4 \
+       --rec-resolution 1080p --rec-codec h264 --rec-hw sw
+
+# Clean look — force grid/axes off, white background:
+python scripts/demo_flyover_search_area.py --fade --record fly_clean.mp4 \
+       --rec-grid off --rec-axes off --rec-bg 1,1,1
+```
+
+### Recording flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--record PATH` | _none_ | Record the flyover. Relative paths are placed under `<repo>/video/`. |
+| `--rec-resolution {viewport,4k,1080p,720p,...}` | `viewport` | Output resolution. `viewport` uses the live editor widget size (HiDPI-aware), rounded to even. |
+| `--rec-fps N` | `60` | Output frame rate |
+| `--rec-codec {hevc,h264}` | `hevc` | Codec. HEVC files get the `hvc1` tag for QuickTime / Photos / iOS compatibility. |
+| `--rec-hw {auto,hw,sw}` | `auto` | Encoder selection. `hw` errors out if no HW encoder is available; `sw` forces libx264/libx265. |
+| `--rec-bitrate KBPS` | _auto_ | Override the default bitrate (auto-derived from resolution × fps) |
+| `--rec-grid {inherit,on,off}` | `inherit` | Grid in the video. `inherit` follows the viewer's current setting. |
+| `--rec-axes {inherit,on,off}` | `inherit` | Axes in the video |
+| `--rec-bg R,G,B` | _viewer theme_ | Force background color for the recording (3 or 4 floats 0..1). Restored to the viewer theme on stop. |
+
+### REST recording API
+
+```bash
+# Start (defaults: viewport size, 60 fps, HEVC, HW auto, file under <repo>/video/):
+curl -X POST http://localhost:8350/api/v1/recording/start \
+     -H 'content-type: application/json' \
+     -d '{"path":"manual.mp4","resolution":"4k","fps":60,"codec":"hevc"}'
+
+# Pause / resume — same file stays open:
+curl -X POST http://localhost:8350/api/v1/recording/pause
+curl -X POST http://localhost:8350/api/v1/recording/resume
+
+# Stop and finalize:
+curl -X POST http://localhost:8350/api/v1/recording/stop
+
+# Live status:
+curl    http://localhost:8350/api/v1/recording/status
+
+# Encoder probe — what HW/SW selections will the server make?
+curl    http://localhost:8350/api/v1/recording/encoders | python3 -m json.tool
+```
+
+`POST /recording/start` body fields:
+
+| Field | Default | Description |
+|---|---|---|
+| `path` | `<repo>/video/locul3d_<ts>.mp4` | Output file. Relative paths resolved under `<repo>/video/`. |
+| `width`, `height` | from `resolution` | Explicit dimensions (rounded to even) |
+| `resolution` | `viewport` | Preset (`viewport`, `4k`, `1080p`, `720p`) |
+| `fps` | `60` | Output frame rate |
+| `codec` | `hevc` | `hevc` or `h264` (aliases: `h265`, `avc`, `x264`, `x265` accepted) |
+| `hw` | `auto` | `auto` / `hw` / `sw` |
+| `bitrate_kbps` | auto | Override bitrate (default: ~7.5 Mbps/Mpx-30s for HEVC) |
+| `grid` | `null` (inherit) | `true` / `false` to override the viewer's `show_grid` for the recording |
+| `axes` | `null` (inherit) | Same for `show_axes` |
+| `bg_color` | `null` (inherit) | `[r,g,b]` or `[r,g,b,a]` floats 0..1; restored on stop |
+
+### Behavior notes
+
+- **Deterministic capture** — the animation engine advances its virtual clock by exactly `1/fps` per frame, independent of wall-clock time. The video is frame-perfect even if the GPU + encoder are slower than realtime.
+- **UI is locked** for the duration: mouse, keyboard, toolbars, panels, menus. The viewport keeps repainting so the operator can watch the recording happen in real time. Re-enabled automatically on `stop`, abort, or natural completion.
+- **Backpressure** — a 4-frame bounded queue between the engine and the ffmpeg writer thread throttles the render loop to encoder speed. No frames are silently dropped unless the encoder stalls completely.
+- **Failure on HW request** — `--rec-hw hw` (or `"hw":"hw"` via REST) errors out if no HW encoder is available; the recording is not started. Per design: deterministic failures over silent fallback.
+- **HEVC + QuickTime** — HEVC outputs are tagged `hvc1` (not the libavformat default `hev1`) so QuickTime / Photos / iOS can play them. Other players accept both.
+- **Default folder** — files default to `<repo>/video/` (auto-created). Override per recording with an absolute path.
 
 ---
 

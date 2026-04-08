@@ -131,6 +131,12 @@ async def _start(request: web.Request) -> web.Response:
     hw_pref = (data.get("hw") or "auto").strip().lower()
     bitrate_kbps = data.get("bitrate_kbps")
 
+    # Per-recording viewport overrides.  Pass None to inherit the
+    # viewer's current value (default for all of these).
+    grid = data.get("grid")        # None | bool
+    axes = data.get("axes")        # None | bool
+    bg_color = data.get("bg_color")  # None | [r,g,b] | [r,g,b,a]
+
     # Output path resolution:
     #   - absolute path → use as-is
     #   - relative path → resolved under <repo>/video/
@@ -159,6 +165,9 @@ async def _start(request: web.Request) -> web.Response:
             codec=codec,
             hw_pref=hw_pref,
             bitrate_kbps=int(bitrate_kbps) if bitrate_kbps else None,
+            grid=(None if grid is None else bool(grid)),
+            axes=(None if axes is None else bool(axes)),
+            bg_color=(list(bg_color) if bg_color is not None else None),
         )
     except Exception as exc:
         log.exception("recording.start failed")

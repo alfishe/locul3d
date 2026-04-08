@@ -351,10 +351,18 @@ class AnimationEngine(QObject):
     def _stop_capture_session(self) -> None:
         """Tear down a capture-mode session.
 
-        Stops the QTimer, releases viewport flags, and tells the
-        recorder to flush + close ffmpeg.  The recorder's own
-        ``stop()`` is responsible for re-enabling input on the
-        viewport (it does so via the dispatcher hook).
+        Called from BOTH the natural-completion path (last track
+        finished inside _capture_tick) AND the explicit stop path
+        (dispatcher.stop_recording).  Must be idempotent and must
+        leave the editor in a fully responsive state — viewport
+        unlocked AND parent window setEnabled(True).
+
+        Tries to delegate to the dispatcher's ``_set_input_locked``
+        first (which knows how to unlock both the viewport and the
+        parent window), and falls back to a viewport-only unlock if
+        no dispatcher is attached.  We also restore any per-recording
+        viewport overrides (grid/axes/bg_color) that the dispatcher
+        applied at start so the editor returns to its prior state.
         """
         try:
             self._timer.stop()
@@ -375,6 +383,33 @@ class AnimationEngine(QObject):
                 self._recorder.stop()
             except Exception:
                 log.exception("recorder stop failed")
+
+        # Restore viewport overrides set by dispatcher.start_recording
+        # (grid/axes/bg_color).  Done here so the natural-completion
+        # path also undoes them — otherwise the editor would keep the
+        # forced grid-off state after a recording finishes by itself.
+        if self._dispatcher is not None:
+            overrides = getattr(self._dispatcher, "_rec_overrides", None)
+            if overrides:
+                for attr, value in overrides.items():
+                    try:
+                        setattr(self._viewport, attr, value)
+                    except Exception:
+                        pass
+                self._dispatcher._rec_overrides = {}
+
+        # Full input unlock — viewport AND parent window.  The
+        # dispatcher's helper handles both; without it we can only
+        # unlock the viewport itself, which leaves the surrounding
+        # toolbars / panels greyed out.
+        unlocked = False
+        if self._dispatcher is not None:
+            try:
+                self._dispatcher._set_input_locked(False)
+                unlocked = True
+            except Exception:
+                log.exception("dispatcher input-unlock failed")
+        if not unlocked:
             try:
                 self._viewport.set_input_locked(False)
             except Exception:

@@ -153,6 +153,17 @@ def main():
                     metavar="KBPS",
                     help="Override the encoder bitrate in kbps. "
                          "Default is computed from resolution × fps.")
+    ap.add_argument("--rec-grid", choices=["inherit", "on", "off"],
+                    default="inherit",
+                    help="Grid in the recording. Default 'inherit' uses "
+                         "the viewer's current setting; 'on'/'off' force.")
+    ap.add_argument("--rec-axes", choices=["inherit", "on", "off"],
+                    default="inherit",
+                    help="Axes in the recording. Default 'inherit'.")
+    ap.add_argument("--rec-bg", default=None, metavar="R,G,B",
+                    help="Force background color for the recording, "
+                         "comma-separated floats 0..1 (e.g. 1,1,1 for "
+                         "white). Default: inherit from viewer theme.")
     ap.add_argument("--stop", action="store_true",
                     help="Stop the flyover and exit")
     args = ap.parse_args()
@@ -304,6 +315,20 @@ def main():
         }
         if args.rec_bitrate:
             rec_payload["bitrate_kbps"] = args.rec_bitrate
+        if args.rec_grid != "inherit":
+            rec_payload["grid"] = (args.rec_grid == "on")
+        if args.rec_axes != "inherit":
+            rec_payload["axes"] = (args.rec_axes == "on")
+        if args.rec_bg:
+            try:
+                rgb = [float(x) for x in args.rec_bg.split(",")]
+                if len(rgb) not in (3, 4):
+                    raise ValueError
+                rec_payload["bg_color"] = rgb
+            except ValueError:
+                print(f"ERROR: --rec-bg expects 3 or 4 floats, got "
+                      f"{args.rec_bg!r}")
+                sys.exit(1)
         r = requests.post(f"{API}/recording/start", json=rec_payload, timeout=20)
         if r.status_code != 200:
             print(f"ERROR: recording.start failed: {r.status_code} {r.text}")

@@ -669,6 +669,14 @@ class BaseGLViewport(QOpenGLWidget):
 
     def _paintGL_inner(self):
         """Inner paint implementation - override in subclasses."""
+        # Re-bind the clear color every frame from self.bg_color so
+        # runtime changes (REST settings, theme switches, recording
+        # overrides) take effect without needing to recreate the GL
+        # context.  Cheap call — no per-frame cost worth measuring.
+        try:
+            glClearColor(*self.bg_color)
+        except Exception:
+            pass
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         # Panorama mode — render point cloud AND panorama sphere from

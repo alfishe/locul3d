@@ -322,13 +322,194 @@ The distinction between PUT (geometry replace) and PATCH (property tweak) matter
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/viewport` | Current settings — point_size, show_axes, show_grid, etc. |
-| `PUT` | `/viewport` | Update render settings — `{"point_size": 3, "show_grid": false}` |
+| `GET` | `/viewport` | Current settings — `point_size`, `show_axes`, `show_grid`, `bg_color`, `vsync`, `fps_movement`, `point_attenuation`, `use_layer_colors` |
+| `PUT` | `/viewport` | Update render settings — `{"point_size": 3, "show_grid": false}`. `vsync` is locked into the GL context at creation; PUT returns `vsync_restart_required` if a different value is requested. |
 | `GET` | `/viewport/correction` | Scene correction state |
 | `PUT` | `/viewport/correction` | Set correction — `{"rotate_x": -90, "shift_z": -1.2}` |
 | `GET` | `/viewport/clip` | Current clip planes |
 | `PUT` | `/viewport/clip` | Set AABB clip — `{"x_min": -5, "x_max": 5, ...}` |
 | `DELETE` | `/viewport/clip` | Remove clipping |
+| `GET` | `/viewport/fade` | Current cone-shadow shader fade state — see §5.7 |
+| `PUT` | `/viewport/fade` | Configure / enable / disable the fade — see §5.7 |
+| `GET` | `/viewport/render_mode` | Current render mode (`realtime` or `capture`) |
+| `PUT` | `/viewport/render_mode` | Switch render mode (auto-managed by recording.start/stop in normal use) |
+
+### 5.7 Cone-Shadow Shader Fade
+
+A GLSL 1.20 fragment shader that **fades only point cloud vertices that
+lie inside a cone swept from the camera through an "area of interest"
+bounding sphere AND in front of the AoI's near edge**. Vertices off to
+the side of the cone or behind the AoI keep their full alpha. Used by
+the flyover demo to expose a search-region annotation as the camera
+orbits without dimming the rest of the scene.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/viewport/fade` | `{enable, alpha_mul, band, aoi_center, aoi_radius, available}` |
+| `PUT` | `/viewport/fade` | Update one or more fields |
+
+```json
+PUT /api/v1/viewport/fade
+{
+  "enable": true,
+  "alpha_mul": 0.4,
+  "band": 0.8,
+  "aoi_center": [-1.5, -8.8, 2.8],
+  "aoi_radius": 7.5
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `enable` | bool | When `false`, the shader is bypassed and the renderer falls back to the fixed-function path |
+| `alpha_mul` | float `0..1` | Alpha multiplier for occluding points (default `0.5`; `0` = invisible) |
+| `band` | float (m) | Smoothstep half-band around the AoI's near edge in world units (default `0.5`) |
+| `aoi_center` | `[x,y,z]` | World-space center of the area of interest |
+| `aoi_radius` | float (m) | Bounding-sphere radius of the AoI |
+| `available` | bool _(read-only)_ | `true` if the shader compiled successfully on the current driver |
+
+The shader uses only OpenGL 2.1 compatibility-profile built-ins
+(`gl_ModelViewMatrix`, `gl_Vertex`, `gl_Color`, `gl_FragColor`) and
+requires no GL upgrade. If compilation fails on the driver, the renderer
+silently uses the fixed-function path and `available` reports `false`.
+
+### 5.8 Video Recording
+
+Records the GL viewport to mp4 with platform-native HW encoding,
+software fallback, and explicit pause/resume on the same file.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/recording/encoders` | Probe ffmpeg + report which encoders the server will pick for each `(codec, hw_pref)` combination |
+| `GET` | `/recording/status` | Live state (`idle` / `recording` / `paused` / `stopped`), config, frames written, bytes |
+| `POST` | `/recording/start` | Spawn ffmpeg, switch engine into capture mode, lock UI input |
+| `POST` | `/recording/pause` | Stop writing frames; the file stays open |
+| `POST` | `/recording/resume` | Resume writing to the same file |
+| `POST` | `/recording/stop` | Flush, finalize the file, restore engine, unlock UI |
+
+#### `POST /recording/start` body
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `path` | `<repo>/video/locul3d_<ts>.mp4` | Output. Relative paths placed under `<repo>/video/`; absolute paths used as-is. `.mp4` extension auto-added. |
+| `resolution` | `"viewport"` | Preset name. Recognized: `viewport` (current widget size, HiDPI-aware, even-aligned), `4k`/`uhd` (3840×2160), `1080p`/`fhd`, `720p`/`hd`. |
+| `width`, `height` | from `resolution` | Explicit dimensions. Always rounded down to even — yuv420p needs even sides. |
+| `fps` | `60.0` | Output frame rate |
+| `codec` | `"hevc"` | `"hevc"` or `"h264"`. Aliases accepted: `h265`, `avc`, `x264`, `x265`. |
+| `hw` | `"auto"` | `"auto"` (try HW, fall back to SW), `"hw"` (HW only — fail if unavailable), `"sw"` (force libx264/libx265). |
+| `bitrate_kbps` | computed | Override the auto-derived bitrate (~15 kbps/Mpx-30s for H.264, ~7.5 for HEVC). |
+| `grid` | `null` (inherit) | `true`/`false` to override the viewer's `show_grid` for the recording. Restored on stop. |
+| `axes` | `null` (inherit) | Same for `show_axes`. |
+| `bg_color` | `null` (inherit) | `[r,g,b]` or `[r,g,b,a]` floats 0..1 to force a background color. Restored to the viewer theme on stop. |
+
+#### Response (`/recording/start` and `/recording/status`)
+
+```json
+{
+  "status": "ok",
+  "config": {
+    "path": "/repo/video/fly.mp4",
+    "width": 3840, "height": 2160,
+    "fps": 60.0, "codec": "hevc",
+    "encoder": "hevc_videotoolbox",
+    "encoder_kind": "hw",
+    "bitrate_kbps": 124416,
+    "show_grid": true,
+    "show_axes": true,
+    "bg_color": [0.08, 0.08, 0.12, 1.0]
+  },
+  "warnings": [
+    "no hardware HEVC encoder available on linux; falling back to software"
+  ]
+}
+```
+
+`/recording/status` adds a `stats` block:
+
+```json
+{
+  "stats": {
+    "state": "recording",
+    "frames_written": 137,
+    "frames_dropped": 0,
+    "bytes_written": 25812352,
+    "duration_s": 2.28,
+    "started_at": 12345.67,
+    "last_error": null,
+    "warnings": []
+  }
+}
+```
+
+#### `GET /recording/encoders`
+
+```json
+{
+  "ffmpeg": "/opt/homebrew/bin/ffmpeg",
+  "all": ["h264_videotoolbox", "hevc_videotoolbox", "libx264", "libx265", ...],
+  "selection": {
+    "h264": {
+      "auto": {"encoder": "h264_videotoolbox", "kind": "hw", "warnings": []},
+      "hw":   {"encoder": "h264_videotoolbox", "kind": "hw", "warnings": []},
+      "sw":   {"encoder": "libx264",           "kind": "sw", "warnings": []}
+    },
+    "hevc": {
+      "auto": {"encoder": "hevc_videotoolbox", "kind": "hw", "warnings": []},
+      "hw":   {"encoder": "hevc_videotoolbox", "kind": "hw", "warnings": []},
+      "sw":   {"encoder": "libx265",           "kind": "sw", "warnings": []}
+    }
+  }
+}
+```
+
+#### Encoder priority
+
+| Codec | macOS | Windows | Linux | SW fallback |
+|-------|-------|---------|-------|-------------|
+| H.264 | `h264_videotoolbox` | `h264_nvenc` → `h264_qsv` → `h264_amf` | `h264_nvenc` → `h264_vaapi` → `h264_qsv` | `libx264` |
+| HEVC  | `hevc_videotoolbox` | `hevc_nvenc` → `hevc_qsv` → `hevc_amf` | `hevc_nvenc` → `hevc_vaapi` → `hevc_qsv` | `libx265` |
+
+ffmpeg discovery: `LOCUL3D_FFMPEG` env var → `which ffmpeg` on PATH.
+
+#### Pipeline
+
+```
+Engine._capture_tick (Qt main thread)
+   │  advance virtual_clock by 1/fps
+   │  tick all tracks at virtual_clock
+   │
+   ├─► viewport.render_to_buffer(W, H)        ── offscreen FBO render
+   │     │
+   │     └── glReadPixels → rgb24 bytes        ── samples=0 (no MSAA)
+   │
+   ├─► recorder.feed_frame(bytes)              ── bounded queue.put (4)
+   │     │                                        backpressure: blocks
+   │     │                                        when encoder is slow
+   │     │
+   │     └── writer thread → ffmpeg stdin
+   │            │
+   │            └── ffmpeg ── HW or SW encoder ── mp4
+   │
+   └─► viewport.update()                       ── widget repaint so the
+                                                  operator sees a live
+                                                  preview while UI is
+                                                  locked
+```
+
+#### HEVC + QuickTime
+
+HEVC outputs are tagged `hvc1` (not the libavformat default `hev1`)
+unconditionally. QuickTime / Photos / iOS only accept `hvc1`; other
+players accept both.
+
+#### Failure semantics
+
+- HW encoder request that can't be satisfied raises `EncoderUnavailable`
+  and `recording.start` returns HTTP 400. Recording is not started; the
+  viewport stays in its prior state.
+- A render or write failure during recording calls `recorder.abort()`
+  which closes ffmpeg with the partial output and `_stop_capture_session`
+  unlocks the UI. The error is reported in `stats.last_error`.
 
 ---
 
@@ -416,16 +597,32 @@ Errors:
 
 **Animation** — camera and object animations (see §7 for full details):
 
+> ⚠️ **Track ID field**: pass the user-supplied track id as `track_id`, *not*
+> as `id`. The WebSocket transport uses the top-level `id` field as a
+> request-correlation identifier and pops it before the payload reaches
+> the animation engine. Existing scripts that pass `id` keep working
+> via a fallback in the engine, but new code should use `track_id`.
+
 | Type | Payload | Description |
 |------|---------|-------------|
-| `camera.animate` | `{keyframes, duration_ms, easing?, loop?, ping_pong?, repeat_count?}` | Keyframed camera animation |
-| `camera.transform_continuous` | `{id, property, rate, duration_ms?}` | Continuous camera property change (e.g., 10°/sec orbit) |
-| `dynamic.animate` | `{layer_id, keyframes, duration_ms, easing?, loop?, ping_pong?}` | Keyframed object animation (position, scale, rotation, color, opacity) |
-| `dynamic.transform_continuous` | `{id, layer_id, property, rate, duration_ms?}` | Continuous layer property change |
+| `camera.animate` | `{track_id, keyframes, duration_ms, easing?, loop?, ping_pong?, repeat_count?}` | Keyframed camera animation |
+| `camera.transform_continuous` | `{track_id, property, rate, duration_ms?}` | Continuous camera property change (e.g., 10°/sec orbit) |
+| `dynamic.animate` | `{track_id, layer_id, keyframes, duration_ms, easing?, loop?, ping_pong?}` | Keyframed object animation (position, scale, rotation, color, opacity) |
+| `dynamic.transform_continuous` | `{track_id, layer_id, property, rate, duration_ms?}` | Continuous layer property change |
 | `dynamic.transform` | `{layer_id, position?, rotation_z?, scale?, color?, opacity?}` | One-shot instant transform |
-| `animation.stop` | `{id}` | Stop a specific animation/transform by ID |
-| `transform.stop` | `{id}` | Stop a specific continuous transform by ID |
+| `animation.stop` | `{track_id}` | Stop a specific animation/transform by ID |
+| `transform.stop` | `{track_id}` | Stop a specific continuous transform by ID |
 | `transform.stop_all` | `{}` | Stop all continuous transforms |
+
+**Adaptive realtime FPS controller** — closed-loop GPU-cost-aware
+playback gate (see §8.6):
+
+| Type | Payload | Description |
+|------|---------|-------------|
+| `animation.set_realtime_fps` | `{fps?, min_fps?, adaptive?}` | Set the realtime FPS ceiling, floor, and enable/disable adaptive control |
+| `animation.get_realtime_fps` | `{}` | Returns `{max_fps, min_fps, effective_fps, adaptive, paint_peak_ms, paint_p80_ms, paint_ema_ms, paint_last_ms, paint_last_cpu_ms, time_scale_*}` |
+| `animation.set_preview_mode` | `{enable, target_fps?, min_pts?, max_pts?}` | Hold target FPS by adapting LOD (global vertex stride budget) instead of dropping FPS |
+| `animation.set_time_scale` | `{auto?, scale?, nominal_fps?}` | Slow the virtual animation clock when `effective_fps < nominal_fps` so each rendered frame represents one nominal-fps step (slow but smooth, instead of fast and jumpy) |
 
 **Render Modes** — realtime vs capture (see §8 for full details):
 
@@ -953,6 +1150,140 @@ ws.close()
 |--------|------|-------------|
 | `GET` | `/viewport/render_mode` | Current render mode and capture settings |
 | `PUT` | `/viewport/render_mode` | Switch mode — `{"mode": "capture", "width": 1920, "height": 1080}` |
+
+### 8.6 Adaptive Realtime + Recording-Driven Capture (current implementation)
+
+The original §8.1-8.5 designed capture as a request/response loop where
+the client polls `render.capture_frame`. The shipped implementation
+inverts that: capture is driven by the **AnimationEngine itself** the
+moment a recording is active, and the realtime mode now has its own
+**closed-loop adaptive FPS controller** so the realtime preview gives
+honest feedback even on huge scenes.
+
+#### Realtime mode (closed-loop adaptive)
+
+Drives the playback gate from the GPU's actual paint cost.
+
+```
+QTimer (500 Hz) ─┬─► tick all tracks at virtual_clock
+                 │
+                 ├─► _adapt_effective_fps()
+                 │     paint_peak = viewport._paint_peak_ms
+                 │     period_ms = paint_peak * 1.25 + cooldown_ms (2)
+                 │     eff_fps   = clamp(min, max, 1000/period_ms)
+                 │     snap to 5-FPS grid
+                 │     hysteresis: drops instant, rises ≥ 1 step
+                 │
+                 ├─► gate (both must be satisfied)
+                 │     since_last_render_request >= 1000/eff_fps
+                 │     since_last_paint_end       >= cooldown_ms
+                 │     and not _paint_in_progress
+                 │
+                 └─► viewport.update()       (cheap, schedules paint)
+```
+
+The paint cost signal is **`_paint_peak_ms`** — a slow-decaying peak of
+the per-frame GPU duration measured via `GL_TIME_ELAPSED` queries
+(non-blocking, with a 4-deep in-flight pool). The peak jumps up
+instantly on spikes and decays at ~3% per frame, so the controller
+remembers the worst case for ~30 frames and doesn't oscillate as the
+camera orbits past dense regions.
+
+Why GL queries instead of `glFinish()`: on macOS the Metal command
+buffer drain has 5-15 ms of fixed overhead per `glFinish` call, which
+would dwarf real GPU work on cheap scenes and force the controller to
+report low FPS even when the GPU is idle. Timer queries report true GPU
+nanoseconds with no CPU stall.
+
+##### Virtual animation clock
+
+When `eff_fps < nominal_fps` (default 60), the **virtual animation
+clock** advances at `eff_fps / nominal_fps × wall_dt`. Tracks see this
+slower clock, so each rendered frame represents one nominal-fps step
+regardless of how long the GPU spent painting it. A 15-second nominal
+flyover plays out over 180 wall seconds at 5 FPS, with smooth
+inter-frame motion instead of huge jumps.
+
+Disable via `animation.set_time_scale {auto: false, scale: 1.0}`.
+
+##### Preview mode
+
+Inverse trade-off: hold target FPS by adapting LOD. The engine sets
+`_preview_mode=True` on the viewport, which switches the per-layer
+stride logic to use a **dynamic global vertex budget**. The same
+asymmetric controller tunes that budget instead of FPS:
+
+- `paint > 1.15 × target_dt` → budget *= 0.7
+- `paint < 0.55 × target_dt` → budget *= 1.10 + 50k
+- snapped to 250k-vertex steps
+
+Activated via `animation.set_preview_mode {enable: true, target_fps: 60}`.
+Mutually exclusive with the full-res adaptive path; the controllers
+won't fight.
+
+#### Recording-driven capture mode
+
+Recording is started via `POST /api/v1/recording/start` (see §5.8),
+which:
+
+1. Spawns ffmpeg with the selected encoder.
+2. Switches the engine to `_render_mode = "capture"` and attaches the
+   recorder to the engine.
+3. Saves the viewer's current `show_grid` / `show_axes` / `bg_color`
+   into `_rec_overrides` and applies any per-recording overrides.
+4. Locks UI input on both the viewport AND the parent window
+   (`window.setEnabled(False)`).
+
+While recording, the engine's `_capture_tick` runs once per QTimer
+tick (500 Hz) and:
+
+1. Advances `virtual_clock` by *exactly* `1/fps` (wall-clock independent).
+2. Ticks all tracks at the new virtual time.
+3. If the recorder is **paused**, returns without rendering — the
+   animation effectively freezes in place.
+4. Otherwise: renders the scene to an offscreen FBO at the recording
+   resolution (`viewport.render_to_buffer(W, H)`) and pushes the rgb24
+   bytes to `recorder.feed_frame()`. The recorder's bounded queue is
+   the natural backpressure mechanism — `feed_frame` blocks when the
+   encoder is slower than the renderer, throttling the engine to
+   encoder speed.
+5. Calls `viewport.update()` so the editor widget also repaints,
+   giving the operator a live preview while UI is locked.
+6. When the last track finishes, calls `_stop_capture_session()`
+   which stops the recorder, restores `_rec_overrides`, switches the
+   engine back to realtime, and unlocks input on viewport AND window.
+
+The same `_stop_capture_session()` runs from the explicit
+`POST /recording/stop` path, so natural completion and explicit stop
+are guaranteed to leave the editor in identical state.
+
+Capture mode bypasses the realtime FPS gate, the adaptive FPS
+controller, and the auto time-scale entirely — those are realtime
+concerns. The recorder needs frame-exact determinism.
+
+##### Offscreen FBO
+
+`BaseGLViewport.render_to_buffer(width, height)` creates a
+`QOpenGLFramebufferObject` with `samples=0` (multisample FBOs are not
+directly readable via `glReadPixels` — undefined results, manifests as
+random "wrong opacity / brightness" frames in the output). Width and
+height come from the recorder config; the viewport's `_capture_w` /
+`_capture_h` overrides are set so the projection-matrix code uses the
+FBO's aspect ratio instead of the widget's.
+
+Pixel format: `GL_RGB / GL_UNSIGNED_BYTE` (rgb24). The framebuffer is
+bottom-up; ffmpeg's `vflip` filter flips it on the way to the encoder,
+so we don't pay for a CPU row reversal at 4K.
+
+##### Input lock
+
+`viewport.set_input_locked(True)` short-circuits all mouse / keyboard
+event handlers (`mousePressEvent`, `mouseMoveEvent`, `mouseReleaseEvent`,
+`mouseDoubleClickEvent`, `wheelEvent`, `keyPressEvent`). The dispatcher
+also calls `window.setEnabled(False)` which greys out toolbars, panels,
+menu bar — every widget the user could click. Re-enabled symmetrically
+on stop / abort / natural completion via the same dispatcher helper, so
+all paths converge on a fully responsive editor.
 
 ---
 
@@ -1714,6 +2045,48 @@ To validate the API and provide reference implementations for users, a suite of 
 3. Sends 300 sequential `render.capture_frame` step commands mapped to a slow camera orbit.
 4. Automatically saves frames sequentially to `C:/frames/`.
 5. *(Commented out step)*: Provides the `ffmpeg` command to stitch them into a 60fps video.
+
+### 17.5 `demo_flyover_search_area.py`
+**Goal:** End-to-end exercise of the cone-shadow shader fade,
+adaptive realtime FPS controller, virtual animation clock, and the
+recording API.
+
+**Workflow:**
+1. Reads the editor's `search_region` bbox annotation via
+   `GET /api/v1/shapes/bboxes`.
+2. Frames the camera on it, optionally applies an AABB scene clip
+   above/below the bbox to remove ceiling and floor.
+3. Optionally enables the cone-shadow shader fade with the bbox as
+   the AoI (`PUT /api/v1/viewport/fade`).
+4. Configures the realtime FPS controller (`animation.set_realtime_fps`)
+   or preview mode (`animation.set_preview_mode`).
+5. Sets the virtual-clock auto slowdown (`animation.set_time_scale`).
+6. Optionally starts a video recording (`POST /api/v1/recording/start`)
+   with HW or SW encoder selection, codec, resolution, fps, and
+   per-recording grid/axes/bg overrides.
+7. Runs a continuous azimuth rotation around the bbox via
+   `camera.transform_continuous` (with `track_id` and a finite
+   `duration_ms` when recording).
+8. When recording, polls `GET /api/v1/recording/status` once per
+   second and reports frames/bytes; exits on natural completion.
+
+**Key flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--fade` | Enable cone-shadow shader fade through the search bbox |
+| `--clip {none,z,box}` | Scene clip — `z` removes ceiling/floor outside the bbox |
+| `--max-fps`, `--min-fps`, `--no-adaptive` | Realtime FPS controller |
+| `--preview`, `--preview-fps` | Preview mode (LOD adapts, FPS held) |
+| `--no-time-scale`, `--nominal-fps` | Virtual-clock slowdown control |
+| `--record PATH` | Record to mp4. Relative paths placed under `<repo>/video/` |
+| `--rec-resolution`, `--rec-fps`, `--rec-codec`, `--rec-hw`, `--rec-bitrate` | Recording params |
+| `--rec-grid`, `--rec-axes`, `--rec-bg` | Per-recording viewport overrides |
+| `--stop` | Stop a running flyover and exit |
+
+This is the demo to look at first when wiring a new client — every
+shipped feature has at least one CLI flag that exercises its REST or
+WS endpoint.
 
 ---
 

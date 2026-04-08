@@ -887,6 +887,9 @@ class CommandDispatcher:
         codec: str,
         hw_pref: str,
         bitrate_kbps: Optional[int],
+        grid: Optional[bool] = None,
+        axes: Optional[bool] = None,
+        bg_color: Optional[list] = None,
     ) -> dict:
         def _start():
             rec = self.recorder
@@ -902,6 +905,26 @@ class CommandDispatcher:
             self._animation_engine._render_mode = "capture"
             self._animation_engine.attach_recorder(rec)
             self._animation_engine._frame_number = 0
+
+            # Per-recording viewport overrides.  Save the originals
+            # so we can restore them on stop().  None ⇒ inherit, no
+            # save/restore needed.
+            vp = self._viewport
+            self._rec_overrides = {}
+            if grid is not None:
+                self._rec_overrides["show_grid"] = vp.show_grid
+                vp.show_grid = bool(grid)
+            if axes is not None:
+                self._rec_overrides["show_axes"] = vp.show_axes
+                vp.show_axes = bool(axes)
+            if bg_color is not None:
+                self._rec_overrides["bg_color"] = tuple(vp.bg_color)
+                # Accept rgba (4 floats) or rgb (3 floats, alpha=1).
+                rgba = list(bg_color)
+                if len(rgba) == 3:
+                    rgba.append(1.0)
+                vp.bg_color = tuple(rgba)
+
             self._set_input_locked(True)
             return {
                 "status": "ok",
@@ -911,6 +934,9 @@ class CommandDispatcher:
                     "fps": cfg.fps, "codec": cfg.codec,
                     "encoder": cfg.encoder, "encoder_kind": cfg.encoder_kind,
                     "bitrate_kbps": cfg.bitrate_kbps,
+                    "show_grid": bool(vp.show_grid),
+                    "show_axes": bool(vp.show_axes),
+                    "bg_color": list(vp.bg_color),
                 },
                 "warnings": list(rec.stats.warnings),
             }
@@ -925,6 +951,20 @@ class CommandDispatcher:
                 self._animation_engine._render_mode = "realtime"
                 try:
                     self._animation_engine._stop_capture_session()
+                except Exception:
+                    pass
+            # Restore any viewport overrides applied at start.
+            overrides = getattr(self, "_rec_overrides", None)
+            if overrides:
+                vp = self._viewport
+                for attr, value in overrides.items():
+                    try:
+                        setattr(vp, attr, value)
+                    except Exception:
+                        pass
+                self._rec_overrides = {}
+                try:
+                    vp.update()
                 except Exception:
                     pass
             self._set_input_locked(False)
