@@ -8,7 +8,7 @@ registry and event broadcasting.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Set
+from typing import TYPE_CHECKING, Any, Dict, Optional, Set
 
 import numpy as np
 
@@ -59,6 +59,12 @@ class CommandDispatcher:
         self._event_loop: Any = None  # set by server to the asyncio loop
         # Dynamic layers created via API, keyed by layer_id
         self._dynamic_layers: Dict[str, dict] = {}  # layer_id → metadata
+
+        # Video recorder — lazily created on first use so importing
+        # the recording package (which probes ffmpeg) doesn't happen
+        # at server startup.  Stored on the dispatcher because it has
+        # the same lifecycle as the server.
+        self._recorder: Any = None
 
     # ── Animation engine attachment ───────────────────────────────────
 
@@ -837,6 +843,112 @@ class CommandDispatcher:
             self._viewport.update()
             return {"status": "ok", "index": index}
         return await self._bridge.invoke_on_qt(_delete)
+
+    # ── Recording ────────────────────────────────────────────────────
+
+    @property
+    def recorder(self):
+        """Lazily-created VideoRecorder.
+
+        Importing the recording package probes ``ffmpeg``; we defer
+        that until the first request so the editor still starts
+        cleanly on systems without ffmpeg.
+        """
+        if self._recorder is None:
+            from locul3d.recording.recorder import VideoRecorder
+            self._recorder = VideoRecorder()
+            if self._animation_engine is not None:
+                self._animation_engine.attach_recorder(self._recorder)
+        return self._recorder
+
+    def _set_input_locked(self, locked: bool) -> None:
+        """Lock/unlock the entire window for the recording lifecycle.
+
+        Disables the GL viewport's input handlers AND the parent
+        window so toolbars/panels can't be clicked either. Called
+        on the Qt thread.
+        """
+        try:
+            self._viewport.set_input_locked(locked)
+        except Exception:
+            pass
+        try:
+            self._window.setEnabled(not locked)
+        except Exception:
+            pass
+
+    async def start_recording(
+        self,
+        *,
+        path: str,
+        width: int,
+        height: int,
+        fps: float,
+        codec: str,
+        hw_pref: str,
+        bitrate_kbps: Optional[int],
+    ) -> dict:
+        def _start():
+            rec = self.recorder
+            if self._animation_engine is None:
+                raise RuntimeError("animation engine not available")
+            cfg = rec.start(
+                path=path,
+                width=width, height=height, fps=fps,
+                codec=codec, hw_pref=hw_pref,
+                bitrate_kbps=bitrate_kbps,
+            )
+            # Switch engine into capture mode and lock input.
+            self._animation_engine._render_mode = "capture"
+            self._animation_engine.attach_recorder(rec)
+            self._animation_engine._frame_number = 0
+            self._set_input_locked(True)
+            return {
+                "status": "ok",
+                "config": {
+                    "path": str(cfg.path),
+                    "width": cfg.width, "height": cfg.height,
+                    "fps": cfg.fps, "codec": cfg.codec,
+                    "encoder": cfg.encoder, "encoder_kind": cfg.encoder_kind,
+                    "bitrate_kbps": cfg.bitrate_kbps,
+                },
+                "warnings": list(rec.stats.warnings),
+            }
+        return await self._bridge.invoke_on_qt(_start)
+
+    async def stop_recording(self) -> dict:
+        def _stop():
+            rec = self.recorder
+            stats = rec.stop()
+            # Restore engine to realtime and re-enable input.
+            if self._animation_engine is not None:
+                self._animation_engine._render_mode = "realtime"
+                try:
+                    self._animation_engine._stop_capture_session()
+                except Exception:
+                    pass
+            self._set_input_locked(False)
+            return {
+                "status": "ok",
+                "frames_written": stats.frames_written,
+                "frames_dropped": stats.frames_dropped,
+                "bytes_written": stats.bytes_written,
+                "duration_s": stats.duration_s,
+                "last_error": stats.last_error,
+            }
+        return await self._bridge.invoke_on_qt(_stop)
+
+    async def pause_recording(self) -> dict:
+        def _pause():
+            self.recorder.pause()
+            return {"status": "ok", "state": self.recorder.state}
+        return await self._bridge.invoke_on_qt(_pause)
+
+    async def resume_recording(self) -> dict:
+        def _resume():
+            self.recorder.resume()
+            return {"status": "ok", "state": self.recorder.state}
+        return await self._bridge.invoke_on_qt(_resume)
 
     # ── WS Command Routing ────────────────────────────────────────────
 

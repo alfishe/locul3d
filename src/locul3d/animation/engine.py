@@ -51,6 +51,7 @@ class AnimationEngine(QObject):
         super().__init__()
         self._viewport = viewport
         self._dispatcher = dispatcher
+        self._recorder: Optional[Any] = None  # set by dispatcher.attach_recorder
         self._tracks: List[AnimationTrack] = []
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -118,6 +119,10 @@ class AnimationEngine(QObject):
 
     # ── Track Management ─────────────────────────────────────────────
 
+    def attach_recorder(self, recorder: Any) -> None:
+        """Wire a VideoRecorder so capture-mode ticks push frames to it."""
+        self._recorder = recorder
+
     def add_track(self, track: AnimationTrack) -> None:
         """Add a track, replacing any existing track with the same ID."""
         self.remove_track(track.id)
@@ -152,6 +157,21 @@ class AnimationEngine(QObject):
         """Called by QTimer at ~500 Hz. Ticks all active tracks."""
         real_now = time.perf_counter()
 
+        # ── Capture mode path ─────────────────────────────────────
+        # When a recording is active the engine drives the
+        # animation in DETERMINISTIC virtual time: each tick
+        # advances the clock by exactly 1/recorder.fps and produces
+        # exactly one captured frame.  Wall-clock pace is irrelevant
+        # — the GPU and the encoder run as fast as they can; if
+        # they're slow the editor freezes (input is locked anyway)
+        # and the resulting video is still frame-perfect.
+        if (self._render_mode == "capture"
+                and self._recorder is not None
+                and self._recorder.is_open):
+            self._capture_tick(real_now)
+            return
+
+        # ── Realtime path ─────────────────────────────────────────
         # Advance the virtual animation clock by `dt_real * scale`.
         # Tracks see this monotonic-ish clock instead of perf_counter
         # so the controller can slow them down when paint is heavy
@@ -197,16 +217,6 @@ class AnimationEngine(QObject):
             return
 
         if not dirty:
-            return
-
-        if self._render_mode == "capture":
-            # Capture: every dirty tick = one rendered frame, full quality.
-            self._viewport._interacting = False
-            self._viewport._force_full_res = True
-            self._viewport.update()
-            self._viewport.repaint()
-            self.frame_ready.emit(self._frame_number)
-            self._frame_number += 1
             return
 
         if self._preview_mode:
@@ -263,6 +273,123 @@ class AnimationEngine(QObject):
                 and since_paint_end_ms >= self._render_cooldown_ms):
             self._last_render_request_t = real_now
             vp.update()
+
+    # ── Capture-mode driver ────────────────────────────────────────
+
+    def _capture_tick(self, real_now: float) -> None:
+        """One iteration of the capture loop.
+
+        Per call:
+          1. Advance the virtual clock by 1/recorder.fps regardless
+             of wall-clock time.
+          2. Tick all active tracks at the new virtual time.
+          3. If the recorder is paused → DO NOT render or write a
+             frame; just return after ticking.  This lets the engine
+             "freeze in place" while paused.
+          4. Otherwise: render the scene to an offscreen FBO at the
+             recorder's target resolution, push the bytes to the
+             recorder.  Backpressure (queue.put block) keeps us in
+             lock-step with the encoder.
+          5. When the last track finishes, restore state and emit
+             frame_ready so any external listener (e.g. a UI status
+             bar) sees the count tick down.
+        """
+        rec = self._recorder
+        cfg = rec.config
+        if cfg is None:
+            return
+
+        # Step the virtual clock by exactly 1/output_fps. Recording
+        # mode is wall-clock-independent.
+        self._virtual_clock += 1.0 / max(cfg.fps, 1.0)
+        virtual_now = self._virtual_clock
+
+        for track in self._tracks:
+            track.tick(virtual_now)
+
+        # Drop completed tracks; if all done, finish recording.
+        self._tracks = [t for t in self._tracks if not t.done]
+        all_done = not self._tracks
+
+        if rec.is_active:  # not paused
+            self._viewport._interacting = False
+            self._viewport._force_full_res = True
+            try:
+                rgb = self._viewport.render_to_buffer(cfg.width, cfg.height)
+            except Exception as exc:
+                log.exception("capture render failed")
+                rec.abort(f"render failed: {exc}")
+                self._stop_capture_session()
+                return
+            try:
+                rec.feed_frame(rgb)
+            except Exception as exc:
+                log.exception("recorder feed failed")
+                rec.abort(f"feed failed: {exc}")
+                self._stop_capture_session()
+                return
+            self.frame_ready.emit(self._frame_number)
+            self._frame_number += 1
+
+            # Refresh the editor widget so the operator sees the
+            # animation in real time.  Input is locked but the picture
+            # must keep moving — otherwise the editor looks frozen.
+            # This is a second, cheap render at widget resolution
+            # (the offscreen capture above is the authoritative one).
+            try:
+                self._viewport.update()
+            except Exception:
+                pass
+
+        if all_done:
+            # The animation finished naturally — close the recording
+            # cleanly so the file is finalized.  The dispatcher's
+            # event will let the caller observe completion.
+            log.info("capture: all tracks complete, stopping recorder")
+            self._stop_capture_session()
+
+    def _stop_capture_session(self) -> None:
+        """Tear down a capture-mode session.
+
+        Stops the QTimer, releases viewport flags, and tells the
+        recorder to flush + close ffmpeg.  The recorder's own
+        ``stop()`` is responsible for re-enabling input on the
+        viewport (it does so via the dispatcher hook).
+        """
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        self._real_t_prev = None
+        self._virtual_clock = 0.0
+        self._last_render_request_t = 0.0
+        try:
+            self._viewport._interacting = False
+            self._viewport._force_full_res = False
+            self._viewport._preview_mode = False
+        except Exception:
+            pass
+
+        if self._recorder is not None:
+            try:
+                self._recorder.stop()
+            except Exception:
+                log.exception("recorder stop failed")
+            try:
+                self._viewport.set_input_locked(False)
+            except Exception:
+                pass
+
+        # Switch back to realtime mode automatically so the next
+        # animation isn't accidentally captured.
+        self._render_mode = "realtime"
+        self._frame_number = 0
+
+        # Final cleanup paint so the unmodified scene is shown.
+        try:
+            self._viewport.update()
+        except Exception:
+            pass
 
     def _adapt_effective_fps(self) -> None:
         """Closed-form FPS controller (single regime).

@@ -127,6 +127,32 @@ def main():
                     help="Frame rate the animation is *authored* for "
                          "(default 60). The auto time-scale slows "
                          "playback by eff_fps / nominal_fps.")
+    # ── Video recording ─────────────────────────────────────────
+    ap.add_argument("--record", metavar="PATH", default=None,
+                    help="Record the flyover to a video file. PATH may "
+                         "be relative (placed under <repo>/video/) or "
+                         "absolute. Implies capture mode — UI input is "
+                         "locked for the duration.")
+    ap.add_argument("--rec-resolution", default="viewport",
+                    choices=["viewport", "4k", "uhd", "1080p", "fhd",
+                             "720p", "hd"],
+                    help="Video resolution (default 'viewport' = current "
+                         "editor window size, auto-aligned to even). "
+                         "Other presets: 4k (UHD 3840×2160), 1080p, 720p.")
+    ap.add_argument("--rec-fps", type=float, default=60.0,
+                    help="Video frame rate (default 60).")
+    ap.add_argument("--rec-codec", default="hevc",
+                    choices=["hevc", "h265", "h264", "avc"],
+                    help="Video codec (default hevc).")
+    ap.add_argument("--rec-hw", default="auto",
+                    choices=["auto", "hw", "sw"],
+                    help="Encoder selection: auto (HW with SW fallback), "
+                         "hw (HW only — fail if unavailable), sw (force "
+                         "libx264/libx265).")
+    ap.add_argument("--rec-bitrate", type=int, default=None,
+                    metavar="KBPS",
+                    help="Override the encoder bitrate in kbps. "
+                         "Default is computed from resolution × fps.")
     ap.add_argument("--stop", action="store_true",
                     help="Stop the flyover and exit")
     args = ap.parse_args()
@@ -267,13 +293,74 @@ def main():
         print(f"FULL-RES [{mode}]: ceiling={fps_resp['max_fps']:.0f}, "
               f"floor={fps_resp['min_fps']:.0f}")
 
-    # Continuous azimuth rotation: 360° over `duration` seconds
+    # ── Recording (optional) ────────────────────────────────────
+    if args.record:
+        rec_payload = {
+            "path": args.record,
+            "resolution": args.rec_resolution,
+            "fps": args.rec_fps,
+            "codec": args.rec_codec,
+            "hw": args.rec_hw,
+        }
+        if args.rec_bitrate:
+            rec_payload["bitrate_kbps"] = args.rec_bitrate
+        r = requests.post(f"{API}/recording/start", json=rec_payload, timeout=20)
+        if r.status_code != 200:
+            print(f"ERROR: recording.start failed: {r.status_code} {r.text}")
+            sys.exit(1)
+        info = r.json()
+        cfg = info.get("config", {})
+        warns = info.get("warnings", [])
+        for w in warns:
+            print(f"WARN: {w}")
+        print(f"Recording → {cfg.get('path')} "
+              f"[{cfg.get('encoder')} ({cfg.get('encoder_kind')}), "
+              f"{cfg.get('width')}x{cfg.get('height')}@{cfg.get('fps')}, "
+              f"{cfg.get('bitrate_kbps')} kbps]")
+        print("UI input is locked while recording. "
+              "Animation runs in deterministic capture mode.")
+
+    # Continuous azimuth rotation: 360° over `duration` seconds.
+    # When recording, we set duration_ms so the track ends naturally;
+    # the engine then closes the recorder and re-enables input.
     rate = 360.0 / max(args.duration, 0.1)
-    ws_send(ws, "camera.transform_continuous",
-            track_id=TRACK_ID, property="azimuth", rate=rate)
+    cmd_kwargs = dict(
+        track_id=TRACK_ID, property="azimuth", rate=rate,
+    )
+    if args.record:
+        cmd_kwargs["duration_ms"] = int(args.duration * 1000)
+    ws_send(ws, "camera.transform_continuous", **cmd_kwargs)
     print(f"Flyover started: {rate:.1f} deg/s "
           f"(one revolution every {args.duration:.1f}s)")
-    print(f"Stop with: python {sys.argv[0]} --stop")
+
+    if not args.record:
+        print(f"Stop with: python {sys.argv[0]} --stop")
+        return
+
+    # ── Poll until recording finishes ──────────────────────────
+    print("Recording in progress (this freezes the editor)...")
+    last_frames = -1
+    while True:
+        time.sleep(1.0)
+        try:
+            s = requests.get(f"{API}/recording/status", timeout=5).json()
+        except Exception:
+            continue
+        stats = s.get("stats", {})
+        n = stats.get("frames_written", 0)
+        state = s.get("state")
+        if n != last_frames:
+            print(f"  state={state}  frames={n}  "
+                  f"dropped={stats.get('frames_dropped', 0)}  "
+                  f"bytes={stats.get('bytes_written', 0)}")
+            last_frames = n
+        if state == "idle" or state == "stopped":
+            break
+    err = stats.get("last_error")
+    if err:
+        print(f"ERROR: {err}")
+        sys.exit(2)
+    print(f"Recording complete: {n} frames written.")
 
 
 if __name__ == "__main__":

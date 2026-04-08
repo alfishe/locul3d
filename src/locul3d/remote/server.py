@@ -108,7 +108,9 @@ class RemoteServer:
 
         # ── REST routes ───────────────────────────────────────────────
 
-        from .handlers import system, camera, scene, viewport, dynamic, shapes
+        from .handlers import (
+            system, camera, scene, viewport, dynamic, shapes, recording,
+        )
 
         system.setup_routes(app, self._dispatcher)
         camera.setup_routes(app, self._dispatcher)
@@ -116,6 +118,7 @@ class RemoteServer:
         viewport.setup_routes(app, self._dispatcher)
         dynamic.setup_routes(app, self._dispatcher)
         shapes.setup_routes(app, self._dispatcher)
+        recording.setup_routes(app, self._dispatcher)
 
         # ── OpenAPI spec ─────────────────────────────────────────────
 

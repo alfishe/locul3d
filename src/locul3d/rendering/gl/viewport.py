@@ -133,6 +133,18 @@ class BaseGLViewport(QOpenGLWidget):
         self._gpu_query_inflight: list = []  # FIFO of issued queries
         self._gpu_query_max_inflight: int = 4
 
+        # Offscreen render override.  When non-None, render_to_buffer
+        # has installed a temporary FBO at this size and the scene
+        # projection / picking math should use these dimensions
+        # instead of the widget's actual size.  See render_to_buffer.
+        self._capture_w: Optional[int] = None
+        self._capture_h: Optional[int] = None
+
+        # Input lock — when True, mouse/keyboard event handlers
+        # short-circuit so the recorder can guarantee deterministic
+        # captures.  Toggled by the VideoRecorder lifecycle.
+        self._input_locked: bool = False
+
         # Override the interactive LOD decimation. Set by the
         # AnimationEngine while a remote-controlled animation is
         # playing so every rendered frame uses every vertex — the
@@ -413,6 +425,109 @@ class BaseGLViewport(QOpenGLWidget):
 
             self._paint_in_progress = False
 
+    # --- Render-size helpers (handles offscreen FBO override) ---
+
+    def _render_width(self) -> int:
+        if self._capture_w is not None:
+            return self._capture_w
+        return max(1, self.width())
+
+    def _render_height(self) -> int:
+        if self._capture_h is not None:
+            return self._capture_h
+        return max(1, self.height())
+
+    # --- Offscreen rendering for the video recorder ---
+
+    def render_to_buffer(self, width: int, height: int) -> bytes:
+        """Render the current scene to an offscreen FBO at *width × height*
+        and return the raw RGB pixel buffer (rgb24, bottom-up).
+
+        Used by VideoRecorder to capture frames at arbitrary resolution
+        independent of the editor window.  Must be called on the Qt
+        main thread (it makeCurrents the GL context).
+        """
+        from PySide6.QtOpenGL import QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat
+        from PySide6.QtGui import QOpenGLContext
+
+        if not HAS_OPENGL or not getattr(self, "_gl_ok", True):
+            return b""
+
+        ctx = QOpenGLContext.currentContext()
+        if ctx is None:
+            self.makeCurrent()
+            owned_ctx = True
+        else:
+            owned_ctx = False
+
+        try:
+            fmt = QOpenGLFramebufferObjectFormat()
+            # IMPORTANT: samples MUST be 0 for an FBO we read with
+            # glReadPixels.  A multisample colour attachment is not
+            # directly readable — the result is undefined and shows
+            # up as occasional "wrong opacity / brightness / density"
+            # frames in the recording.  4K rendering doesn't really
+            # need MSAA anyway; the resolution itself supersamples.
+            fmt.setSamples(0)
+            fmt.setAttachment(QOpenGLFramebufferObject.Attachment.Depth)
+            fbo = QOpenGLFramebufferObject(int(width), int(height), fmt)
+            if not fbo.isValid():
+                log.error("offscreen FBO %dx%d invalid", width, height)
+                return b""
+
+            fbo.bind()
+            saved_w, saved_h = self._capture_w, self._capture_h
+            self._capture_w, self._capture_h = int(width), int(height)
+            try:
+                glViewport(0, 0, int(width), int(height))
+                # Run the same render path as paintGL but writing into
+                # our FBO instead of the widget's default framebuffer.
+                self._paint_in_progress = True
+                t0 = time.perf_counter()
+                gpu_q = self._gpu_timer_begin()
+                try:
+                    self._paintGL_inner()
+                finally:
+                    self._gpu_timer_end(gpu_q)
+
+                # Read the colour attachment.  GL framebuffers are
+                # bottom-up; ffmpeg's ``vflip`` filter flips them on
+                # the way to the encoder, so we don't need to copy
+                # rows here.
+                glPixelStorei(GL_PACK_ALIGNMENT, 1)
+                pixels = glReadPixels(
+                    0, 0, int(width), int(height),
+                    GL_RGB, GL_UNSIGNED_BYTE,
+                )
+                if isinstance(pixels, bytes):
+                    raw = pixels
+                else:
+                    raw = bytes(pixels)
+                t_end = time.perf_counter()
+                self._last_paint_ms = (t_end - t0) * 1000.0
+                self._last_paint_end_t = t_end
+                return raw
+            finally:
+                self._capture_w, self._capture_h = saved_w, saved_h
+                self._paint_in_progress = False
+                fbo.release()
+                # Restore viewport to widget size for next paintGL.
+                glViewport(0, 0, max(1, self.width()), max(1, self.height()))
+        finally:
+            if owned_ctx:
+                self.doneCurrent()
+
+    # --- Input lock for recording ---
+
+    def set_input_locked(self, locked: bool) -> None:
+        """Disable/enable mouse + keyboard input on the viewport.
+
+        VideoRecorder calls this around its lifecycle so the recorded
+        animation is fully deterministic and the user can't drag the
+        camera mid-frame.
+        """
+        self._input_locked = bool(locked)
+
     # --- GPU timer queries (true paint cost, no CPU stall) ---
 
     def _gpu_timer_begin(self) -> Optional[int]:
@@ -578,10 +693,13 @@ class BaseGLViewport(QOpenGLWidget):
 
     def _render_normal_scene(self):
         """Render the normal 3D scene (projection, camera, grid, layers)."""
-        # Projection
+        # Projection — uses _render_width/_height so offscreen captures
+        # at arbitrary resolutions get the correct aspect ratio.
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        aspect = self.width() / max(self.height(), 1)
+        rw = self._render_width()
+        rh = self._render_height()
+        aspect = rw / max(rh, 1)
         far = max(self._scene_radius * 4.0, self.cam_distance * 10, 100.0)
         near = max(0.01, far * 1e-5)
         gluPerspective(self.cam_fov, aspect, near, far)
@@ -724,7 +842,7 @@ class BaseGLViewport(QOpenGLWidget):
         # Projection — match panorama FOV
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        aspect = self.width() / max(self.height(), 1)
+        aspect = self._render_width() / max(self._render_height(), 1)
         far = max(self._scene_radius * 4.0, 200.0)
         near = max(0.01, far * 1e-5)
         gluPerspective(pano_fov, aspect, near, far)
@@ -1481,6 +1599,9 @@ class BaseGLViewport(QOpenGLWidget):
     _CLICK_THRESHOLD = 5  # pixels — drag past this is not a click
 
     def mousePressEvent(self, event):
+        if self._input_locked:
+            event.ignore()
+            return
         self.setFocus()
         self._last_mouse = event.position()
         self._click_pos = event.position()  # remember for drag detection
@@ -1490,6 +1611,9 @@ class BaseGLViewport(QOpenGLWidget):
 
     def mouseMoveEvent(self, event):
         """Handle mouse movement for camera control and marker hover."""
+        if self._input_locked:
+            event.ignore()
+            return
         # Hover tooltip (no button pressed)
         if self._last_mouse is None and self._panorama:
             if not self._panorama.is_active:
@@ -1566,6 +1690,9 @@ class BaseGLViewport(QOpenGLWidget):
 
     def mouseDoubleClickEvent(self, event):
         """Double-click on panorama marker → select + open info panel."""
+        if self._input_locked:
+            event.ignore()
+            return
         if (
             event.button() == Qt.MouseButton.LeftButton
             and self._panorama
@@ -1587,6 +1714,9 @@ class BaseGLViewport(QOpenGLWidget):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._input_locked:
+            event.ignore()
+            return
         # Check for click (not drag) on a panorama marker
         if (
             self._click_pos is not None
@@ -1608,6 +1738,9 @@ class BaseGLViewport(QOpenGLWidget):
         self._start_interaction()  # redraw happens after 300ms delay
 
     def wheelEvent(self, event):
+        if self._input_locked:
+            event.ignore()
+            return
         angle = event.angleDelta()
         delta = angle.y() if abs(angle.y()) >= abs(angle.x()) else angle.x()
 
@@ -1652,6 +1785,9 @@ class BaseGLViewport(QOpenGLWidget):
           ← → ↑ ↓ — rotate scene around Z / X
           Hold Shift for 10× step, Ctrl for 100×.
         """
+        if self._input_locked:
+            event.ignore()
+            return
         if self._panorama and self._panorama.is_active:
             if self._panorama.handle_key_event(event.key(), event.modifiers()):
                 self.update()
