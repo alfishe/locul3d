@@ -205,6 +205,7 @@ class CommandDispatcher:
                 fps_movement=vp.fps_movement,
                 point_attenuation=vp.point_attenuation,
                 bg_color=list(vp.bg_color) if vp.bg_color else None,
+                vsync=bool(getattr(vp, "vsync", False)),
             ).model_dump()
 
         return await self._bridge.invoke_on_qt(_get)
@@ -226,8 +227,21 @@ class CommandDispatcher:
                 vp.point_attenuation = settings.point_attenuation
             if settings.bg_color is not None:
                 vp.bg_color = tuple(settings.bg_color)
+
+            result = {"status": "ok"}
+            if settings.vsync is not None:
+                # Vsync is locked into the GL context at creation;
+                # we can update the module-level default so the next
+                # process honors it, but the live viewport is fixed.
+                from locul3d.rendering.gl.viewport import set_default_vsync
+                set_default_vsync(settings.vsync)
+                current = bool(getattr(vp, "vsync", False))
+                if settings.vsync != current:
+                    result["vsync_restart_required"] = True
+                    result["vsync_current"] = current
+                    result["vsync_pending"] = settings.vsync
             vp.update()
-            return {"status": "ok"}
+            return result
 
         return await self._bridge.invoke_on_qt(_set)
 
@@ -835,6 +849,10 @@ class CommandDispatcher:
         "animation.stop",
         "transform.stop",
         "transform.stop_all",
+        "animation.set_realtime_fps",
+        "animation.get_realtime_fps",
+        "animation.set_preview_mode",
+        "animation.set_time_scale",
     })
 
     async def handle_ws_command(self, msg_type: str, data: dict) -> dict:

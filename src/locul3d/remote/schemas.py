@@ -359,6 +359,10 @@ class ViewportSettings(BaseModel):
     fps_movement: Optional[bool] = None
     point_attenuation: Optional[bool] = None
     bg_color: Optional[List[float]] = None
+    # Vsync is read-only at runtime (locked into the GL context).
+    # PUT will accept the field but mark `vsync_restart_required` in
+    # the response if the requested value differs from the current.
+    vsync: Optional[bool] = None
 
 
 class CorrectionState(BaseModel):

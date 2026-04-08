@@ -54,6 +54,29 @@ except ImportError:
     HAS_PANORAMA = False
 
 
+# Module-level vsync default. Set by viewer/editor entry points
+# (or via locul3d.rendering.gl.viewport.set_default_vsync()) BEFORE
+# any viewport is constructed — the swap interval is baked into the
+# QSurfaceFormat which Qt uses to create the GL context, and changing
+# it later requires recreating the context, which we don't support.
+# Default is OFF so the adaptive FPS controller sees real GPU paint
+# timings instead of display-refresh wait time.
+_DEFAULT_VSYNC: bool = False
+
+
+def set_default_vsync(enable: bool) -> None:
+    """Set the vsync default applied to subsequently created viewports.
+
+    Must be called before the first ``BaseGLViewport.__init__``.
+    """
+    global _DEFAULT_VSYNC
+    _DEFAULT_VSYNC = bool(enable)
+
+
+def get_default_vsync() -> bool:
+    return _DEFAULT_VSYNC
+
+
 class BaseGLViewport(QOpenGLWidget):
     """Base OpenGL viewport widget for 3D rendering."""
 
@@ -67,6 +90,13 @@ class BaseGLViewport(QOpenGLWidget):
         fmt.setSamples(4)
         fmt.setDepthBufferSize(24)
         fmt.setVersion(2, 1)
+        # Vsync: defaults OFF so the adaptive FPS controller sees
+        # real GPU paint timings instead of display-refresh wait
+        # time.  Tearing on a point-cloud orbit is visually
+        # irrelevant.  The value is locked into the GL context at
+        # creation; runtime changes require restarting the app.
+        self.vsync: bool = _DEFAULT_VSYNC
+        fmt.setSwapInterval(1 if self.vsync else 0)
         self.setFormat(fmt)
 
         self.setMinimumSize(600, 400)
@@ -81,6 +111,42 @@ class BaseGLViewport(QOpenGLWidget):
         self.cam_elevation = 30.0
         self.cam_target = np.array([0.0, 0.0, 0.0])
         self.cam_fov = 45.0
+
+        # Cone-shadow fade for point layers (shader-driven, optional).
+        # When enabled, the renderer fades only points that lie inside
+        # the cone swept from the camera through the area-of-interest
+        # bounding sphere AND in front of the AoI's near edge — so
+        # only "occluders" of the AoI dim, not the whole foreground.
+        self.fade_enable: bool = False
+        self.fade_alpha_mul: float = 0.5
+        self.fade_band: float = 0.5  # smoothstep half-band, world units
+        # AoI specified in world space. Transformed to view space per
+        # frame so the cone tracks the camera as it orbits.
+        self.fade_aoi_center: np.ndarray = np.zeros(3, dtype=np.float64)
+        self.fade_aoi_radius: float = 0.0
+        self._point_shader = None    # lazily created in initializeGL
+
+        # GPU timer query state — true GPU paint duration without
+        # blocking the CPU.  See _gpu_timer_begin/_end/_collect_ready.
+        self._gpu_timer_supported: Optional[bool] = None
+        self._gpu_query_pool: list = []      # idle reusable query IDs
+        self._gpu_query_inflight: list = []  # FIFO of issued queries
+        self._gpu_query_max_inflight: int = 4
+
+        # Override the interactive LOD decimation. Set by the
+        # AnimationEngine while a remote-controlled animation is
+        # playing so every rendered frame uses every vertex — the
+        # adaptive FPS controller then sees true paint cost and the
+        # frames are recordable as-is.  Local mouse-drag interactivity
+        # is unaffected (it still uses _interacting + stride LOD).
+        self._force_full_res: bool = False
+
+        # Preview mode: opposite trade-off from _force_full_res. Holds
+        # the render rate at a target FPS by *adapting LOD* (the global
+        # stride budget) instead of dropping FPS. AnimationEngine flips
+        # this on per request and tunes _preview_budget_pts to match.
+        self._preview_mode: bool = False
+        self._preview_budget_pts: int = 25_000_000
 
         # Mouse state
         self._last_mouse = None
@@ -255,6 +321,17 @@ class BaseGLViewport(QOpenGLWidget):
             glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.8, 0.8, 0.8, 1.0])
             glLightfv(GL_LIGHT0, GL_SPECULAR, [0.2, 0.2, 0.2, 1.0])
             self._gl_ok = True
+
+            # Compile the optional point-fade shader.  If compilation
+            # fails (driver too old, no GLSL 1.20 support, etc.) the
+            # object reports unavailable and _draw_point_layer falls
+            # back to the fixed-function path automatically.
+            try:
+                from .point_shader import PointFadeShader
+                self._point_shader = PointFadeShader()
+                self._point_shader.ensure_compiled()
+            except Exception:
+                self._point_shader = None
         except Exception:
             self._gl_ok = False
 
@@ -269,6 +346,9 @@ class BaseGLViewport(QOpenGLWidget):
         if not getattr(self, "_gl_ok", True):
             return
 
+        self._paint_in_progress = True
+        t0 = time.perf_counter()
+        gpu_q = self._gpu_timer_begin()
         try:
             self._paintGL_inner()
         except Exception:
@@ -279,6 +359,161 @@ class BaseGLViewport(QOpenGLWidget):
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             except Exception:
                 pass
+        finally:
+            # End the GPU timer query and try to harvest the OLDEST
+            # finished query non-blockingly. Result is in nanoseconds
+            # of pure GPU work — no CPU stall, no Metal/driver flush
+            # overhead bias.  CPU dispatch time becomes a fallback,
+            # used only on the bootstrap frames where no GPU result
+            # has been delivered yet.
+            self._gpu_timer_end(gpu_q)
+            gpu_ms = self._gpu_timer_collect_ready()
+
+            t_end = time.perf_counter()
+            cpu_dispatch_ms = (t_end - t0) * 1000.0
+
+            # Prefer the GPU timing when we have it; fall back to
+            # CPU dispatch on the first few frames before any query
+            # has finished, or if the driver doesn't support queries.
+            if gpu_ms is not None and gpu_ms > 0.0:
+                dt_ms = gpu_ms
+            else:
+                dt_ms = cpu_dispatch_ms
+
+            prev = getattr(self, "_paint_ema_ms", 0.0)
+            self._paint_ema_ms = (prev * 0.8 + dt_ms * 0.2) if prev > 0 else dt_ms
+            self._last_paint_ms = dt_ms
+            self._last_paint_cpu_ms = cpu_dispatch_ms
+            self._last_paint_end_t = t_end
+
+            ring = getattr(self, "_paint_ring_ms", None)
+            if ring is None:
+                ring = [dt_ms] * 8
+                self._paint_ring_idx = 0
+            ring[self._paint_ring_idx] = dt_ms
+            self._paint_ring_idx = (self._paint_ring_idx + 1) % len(ring)
+            self._paint_ring_ms = ring
+            # 80th percentile of an 8-frame window: index 6 of sorted.
+            self._paint_p80_ms = sorted(ring)[6]
+
+            # Slow-decaying peak: jumps up instantly to capture
+            # spikes, decays at ~3% per frame so the controller
+            # remembers the worst-case for ~30 frames (~3-6 s at the
+            # rates we operate at). This is the signal the realtime
+            # FPS controller actually consumes — its monotonic-up
+            # behavior is what stops eff_fps from oscillating between
+            # 5 and 10 as paint cost varies frame to frame.
+            prev_peak = getattr(self, "_paint_peak_ms", 0.0)
+            if prev_peak <= 0.0:
+                new_peak = dt_ms
+            else:
+                # Decay first, then take the max with the new sample.
+                new_peak = max(prev_peak * 0.97, dt_ms)
+            self._paint_peak_ms = new_peak
+
+            self._paint_in_progress = False
+
+    # --- GPU timer queries (true paint cost, no CPU stall) ---
+
+    def _gpu_timer_begin(self) -> Optional[int]:
+        """Issue a GL_TIME_ELAPSED query around the next paint.
+
+        Returns the query id (to pass to _gpu_timer_end) or None if
+        the driver doesn't support timer queries — in which case the
+        caller falls back to CPU dispatch timing.
+
+        If the in-flight queue is at its bound, this performs a
+        blocking read on the OLDEST query and recycles it.  That
+        single block is the only place we ever stall the CPU on the
+        GPU; it provides natural backpressure when the GPU pipeline
+        is genuinely overcommitted.
+        """
+        if self._gpu_timer_supported is False:
+            return None
+        try:
+            # Bound the in-flight queue. If full, drain the oldest by
+            # blocking — that's our backpressure mechanism.
+            while len(self._gpu_query_inflight) >= self._gpu_query_max_inflight:
+                q_old = self._gpu_query_inflight.pop(0)
+                try:
+                    ns = int(glGetQueryObjectuiv(q_old, GL_QUERY_RESULT))
+                except Exception:
+                    ns = 0
+                self._gpu_query_pool.append(q_old)
+                if ns > 0:
+                    self._pending_gpu_ms = ns / 1e6
+
+            # Acquire a query id from the pool or generate a new one.
+            if self._gpu_query_pool:
+                q = self._gpu_query_pool.pop()
+            else:
+                ids = glGenQueries(1)
+                # PyOpenGL may return an int or a sequence; normalize.
+                q = int(ids[0]) if hasattr(ids, "__getitem__") else int(ids)
+            glBeginQuery(GL_TIME_ELAPSED, q)
+            if self._gpu_timer_supported is None:
+                self._gpu_timer_supported = True
+            return q
+        except Exception:
+            # Driver doesn't support timer queries — disable forever
+            # and fall back to CPU dispatch timing.
+            self._gpu_timer_supported = False
+            return None
+
+    def _gpu_timer_end(self, q: Optional[int]) -> None:
+        if q is None:
+            return
+        try:
+            glEndQuery(GL_TIME_ELAPSED)
+            self._gpu_query_inflight.append(q)
+        except Exception:
+            # If glEndQuery failed for whatever reason, return the
+            # query to the pool so we don't leak it.
+            try:
+                self._gpu_query_pool.append(q)
+            except Exception:
+                pass
+
+    def _gpu_timer_collect_ready(self) -> Optional[float]:
+        """Drain finished queries non-blockingly. Returns the most
+        recent GPU duration in milliseconds, or None if nothing
+        finished this frame (or no queries are in flight).
+        """
+        if not self._gpu_query_inflight:
+            # Maybe a previous frame's blocking-drain produced a
+            # value waiting to be consumed.
+            pending = getattr(self, "_pending_gpu_ms", None)
+            if pending is not None:
+                self._pending_gpu_ms = None
+                return pending
+            return None
+
+        latest_ms: Optional[float] = None
+        while self._gpu_query_inflight:
+            q = self._gpu_query_inflight[0]
+            try:
+                avail = int(glGetQueryObjectiv(q, GL_QUERY_RESULT_AVAILABLE))
+            except Exception:
+                break
+            if not avail:
+                break
+            self._gpu_query_inflight.pop(0)
+            try:
+                ns = int(glGetQueryObjectuiv(q, GL_QUERY_RESULT))
+            except Exception:
+                ns = 0
+            self._gpu_query_pool.append(q)
+            if ns > 0:
+                latest_ms = ns / 1e6
+
+        # If a blocking drain in _gpu_timer_begin produced a value
+        # earlier this frame, prefer it (it's the freshest).
+        pending = getattr(self, "_pending_gpu_ms", None)
+        if pending is not None:
+            self._pending_gpu_ms = None
+            latest_ms = pending if latest_ms is None else max(latest_ms, pending)
+
+        return latest_ms
 
     # --- VBO helpers ---
 
@@ -431,13 +666,19 @@ class BaseGLViewport(QOpenGLWidget):
                 layer.gpu_resident = False
 
         # Global interactive stride: cap total drawn points during
-        # mouse-drag so aggregate draw stays within budget.
-        INTERACTIVE_BUDGET = 25_000_000
+        # mouse-drag (or preview-mode animation) so aggregate draw
+        # stays within budget. In preview mode the AnimationEngine
+        # tunes _preview_budget_pts dynamically to hold target FPS.
+        DEFAULT_INTERACTIVE_BUDGET = 25_000_000
+        if self._preview_mode:
+            INTERACTIVE_BUDGET = max(100_000, int(self._preview_budget_pts))
+        else:
+            INTERACTIVE_BUDGET = DEFAULT_INTERACTIVE_BUDGET
         total_vis = sum(
             l.point_count for l in visible if l.layer_type == "pointcloud"
         )
         self._total_vis_pts = total_vis  # cached for uniform point sizing
-        if self._interacting:
+        if self._interacting or self._preview_mode:
             self._global_interact_stride = (
                 max(1, total_vis // INTERACTIVE_BUDGET)
                 if total_vis > INTERACTIVE_BUDGET
@@ -567,11 +808,20 @@ class BaseGLViewport(QOpenGLWidget):
         MAX_INTERACTIVE_PTS = 25_000_000  # Drag: High detail preview
         MAX_OPACITY_PREVIEW_PTS = 500_000 # Slider: Instant response
 
-        if self._adjusting_opacity and layer.point_count > MAX_OPACITY_PREVIEW_PTS:
+        # Remote-driven animation forces full-resolution rendering so
+        # the realtime preview matches what capture mode would produce.
+        # Only the absolute static safety cap (MAX_STATIC_PTS) applies.
+        if self._force_full_res:
+            if layer.point_count > MAX_STATIC_PTS:
+                stride = max(1, layer.point_count // MAX_STATIC_PTS)
+            else:
+                stride = 1
+        elif self._adjusting_opacity and layer.point_count > MAX_OPACITY_PREVIEW_PTS:
             stride = max(1, layer.point_count // MAX_OPACITY_PREVIEW_PTS)
-        elif self._interacting:
+        elif self._interacting or self._preview_mode:
             stride = max(1, layer.point_count // MAX_INTERACTIVE_PTS)
-            # Also respect the global budget stride
+            # Also respect the global budget stride (which the
+            # AnimationEngine tunes in preview mode to hold target FPS).
             stride = max(stride, getattr(self, "_global_interact_stride", 1))
         elif layer.point_count > MAX_STATIC_PTS:
             stride = max(1, layer.point_count // MAX_STATIC_PTS)
@@ -611,24 +861,65 @@ class BaseGLViewport(QOpenGLWidget):
                     glEnableClientState(GL_COLOR_ARRAY)
                     glColorPointer(3, GL_FLOAT, rgb_stride, None)
 
-        # Apply layer opacity as a GPU-side blend — no data regeneration
-        # needed.  RGB vertex colors have implicit alpha=1.0; we modulate
-        # the final fragment alpha via GL_CONSTANT_ALPHA so that changing
-        # the opacity slider is instant even for 100M-point layers.
-        #
-        # For opaque layers: DISABLE blending to prevent color accumulation
-        # when overlapping layers share coordinates (GL_POINT_SMOOTH edges
-        # would bleed through otherwise).
-        needs_blend = layer.opacity < 0.99
-        if needs_blend:
+        # Optional cone-shadow fade shader (GLSL 1.20).  When active it
+        # writes the per-fragment alpha directly, so we use the
+        # standard SRC_ALPHA blend instead of the CONSTANT_ALPHA trick
+        # the fixed-function path relies on.
+        shader = self._point_shader
+        use_shader = (
+            self.fade_enable
+            and self.fade_aoi_radius > 0.0
+            and shader is not None
+            and shader.available
+        )
+
+        if use_shader:
+            # Transform AoI world-space center to view space using
+            # the current modelview matrix.  GL stores it as a
+            # column-major 4x4 — so np takes the transpose for the
+            # usual row-vector multiply.
+            mv = glGetFloatv(GL_MODELVIEW_MATRIX)  # 4x4 column-major
+            mv_np = np.asarray(mv, dtype=np.float64).T
+            cw = np.array([self.fade_aoi_center[0],
+                           self.fade_aoi_center[1],
+                           self.fade_aoi_center[2],
+                           1.0], dtype=np.float64)
+            cv = mv_np @ cw  # view-space center
+            shader.bind()
+            shader.set_uniforms(
+                aoi_center_view=(float(cv[0]), float(cv[1]), float(cv[2])),
+                aoi_radius=float(self.fade_aoi_radius),
+                fade_band=float(self.fade_band),
+                fade_mul=float(self.fade_alpha_mul),
+                layer_alpha=float(layer.opacity),
+                fade_enable=True,
+            )
             glEnable(GL_BLEND)
-            glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
-            glBlendColor(0.0, 0.0, 0.0, layer.opacity)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            needs_blend = False  # restore handled below
+            shader_was_bound = True
         else:
-            glDisable(GL_BLEND)
+            shader_was_bound = False
+            # Apply layer opacity as a GPU-side blend — no data regen.
+            # RGB vertex colors have implicit alpha=1.0; we modulate
+            # the final fragment alpha via GL_CONSTANT_ALPHA so the
+            # opacity slider is instant even for 100M-point layers.
+            #
+            # For opaque layers: DISABLE blending to prevent color
+            # accumulation when overlapping layers share coordinates
+            # (GL_POINT_SMOOTH edges would bleed through otherwise).
+            needs_blend = layer.opacity < 0.99
+            if needs_blend:
+                glEnable(GL_BLEND)
+                glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA)
+                glBlendColor(0.0, 0.0, 0.0, layer.opacity)
+            else:
+                glDisable(GL_BLEND)
 
         glDrawArrays(GL_POINTS, 0, draw_count)
 
+        if shader_was_bound:
+            shader.unbind()
         if needs_blend:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 

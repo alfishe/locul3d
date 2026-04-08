@@ -40,7 +40,23 @@ def main():
                         help="Disable the Remote API server")
     parser.add_argument("--api-host", type=str, default="127.0.0.1",
                         help="Remote API bind address (default: 127.0.0.1)")
+    # Vsync (default OFF — see locul3d.rendering.gl.viewport docstring)
+    vsync_group = parser.add_mutually_exclusive_group()
+    vsync_group.add_argument("--vsync", dest="vsync", action="store_true",
+                             default=False,
+                             help="Enable vsync. Caps frame rate to the "
+                                  "display refresh; the adaptive FPS "
+                                  "controller will see refresh-wait time "
+                                  "as paint cost and throttle accordingly.")
+    vsync_group.add_argument("--no-vsync", dest="vsync", action="store_false",
+                             help="Disable vsync (default). Required for "
+                                  "honest paint timing.")
     args = parser.parse_args()
+
+    # Apply vsync default BEFORE creating widgets — the swap interval
+    # is baked into QSurfaceFormat at GL context creation.
+    from locul3d.rendering.gl.viewport import set_default_vsync
+    set_default_vsync(args.vsync)
 
     correction = {
         'rotate_x': args.rotate_x,
