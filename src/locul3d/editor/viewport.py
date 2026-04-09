@@ -214,14 +214,13 @@ class EditorViewport(BaseGLViewport):
 
         try:
             from OpenGL.GL import (glDisable, glEnable, glLineWidth, glBegin, glEnd,
-                                   GL_DEPTH_TEST, GL_BLEND, glBlendFunc,
+                                   GL_BLEND, glBlendFunc,
                                    GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
                                    glDepthMask, GL_FALSE, GL_TRUE)
         except ImportError:
             return
 
         glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
 
         # --- Pass 1: Filled faces (back-to-front is approximate but acceptable) ---
         has_fills = any(b.visible and b.fill_opacity > 0 for b in self.annotations)
@@ -270,7 +269,6 @@ class EditorViewport(BaseGLViewport):
                 glVertex3dv(corners[b])
             glEnd()
 
-        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
     def _draw_gizmo(self, bbox):
@@ -387,9 +385,8 @@ class EditorViewport(BaseGLViewport):
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        from OpenGL.GL import glDepthMask, GL_DEPTH_TEST
+        from OpenGL.GL import glDepthMask
         glDepthMask(GL_FALSE)
-        glDisable(GL_DEPTH_TEST)
 
         for plane in planes:
             if not plane.visible:
@@ -413,7 +410,6 @@ class EditorViewport(BaseGLViewport):
                 glVertex3dv(c)
             glEnd()
 
-        glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
         glDisable(GL_BLEND)
         glEnable(GL_LIGHTING)
@@ -460,14 +456,13 @@ class EditorViewport(BaseGLViewport):
             return
         try:
             from OpenGL.GL import (glDisable, glEnable, glLineWidth, glBegin, glEnd,
-                                   GL_DEPTH_TEST, GL_BLEND, glBlendFunc,
+                                   GL_BLEND, glBlendFunc,
                                    GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
                                    glDepthMask, GL_FALSE, GL_TRUE)
         except ImportError:
             return
 
         glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
 
         # --- Pass 1: Filled faces ---
         has_fills = any(b.fill_opacity > 0 for b in visible)
@@ -503,7 +498,6 @@ class EditorViewport(BaseGLViewport):
                 glVertex3dv(corners[b_idx])
             glEnd()
 
-        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
     def _draw_gap_annotations(self):
@@ -513,13 +507,11 @@ class EditorViewport(BaseGLViewport):
             return
 
         try:
-            from OpenGL.GL import (glDisable, glEnable, glLineWidth, glBegin, glEnd,
-                                   GL_DEPTH_TEST)
+            from OpenGL.GL import glDisable, glEnable, glLineWidth, glBegin, glEnd
         except ImportError:
             return
 
         glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
         glLineWidth(3.0)
 
         arrow_sz = 0.02  # arrowhead size
@@ -572,7 +564,6 @@ class EditorViewport(BaseGLViewport):
                 glVertex3dv(b); glVertex3dv(b - d_arrow - barb)
             glEnd()
 
-        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
         # Store scene-space modelview for paintEvent label projection
