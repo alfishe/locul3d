@@ -455,12 +455,18 @@ class PanoramaManager:
                 elif fi == 3:
                     uc = -x[fm] / ay[fm] * 0.5 + 0.5
                     vc = -z[fm] / ay[fm] * 0.5 + 0.5
-                elif fi == 4:
-                    uc = y[fm] / az[fm] * 0.5 + 0.5
-                    vc = x[fm] / az[fm] * 0.5 + 0.5
-                else:
-                    uc = y[fm] / az[fm] * 0.5 + 0.5
-                    vc = -x[fm] / az[fm] * 0.5 + 0.5
+                elif fi == 4:  # +Z (TOP)
+                    # Yaw-flipped 180° to match the horizontal slot mapping
+                    # in _sort_cubemap_faces, which assumes local +Z = look
+                    # direction. Cubemap panorama pinhole cameras actually
+                    # look along local -Z (GL convention), so the horizontal
+                    # panorama is yaw-rotated 180° from true world; the
+                    # top/bottom face UV must yaw-flip to keep seams aligned.
+                    uc = -x[fm] / az[fm] * 0.5 + 0.5
+                    vc = -y[fm] / az[fm] * 0.5 + 0.5
+                else:  # fi == 5, -Z (BOTTOM)
+                    uc = -x[fm] / az[fm] * 0.5 + 0.5
+                    vc = y[fm] / az[fm] * 0.5 + 0.5
 
                 px = np.clip((uc * fw).astype(int), 0, fw - 1)
                 py = np.clip((vc * fh).astype(int), 0, fh - 1)
