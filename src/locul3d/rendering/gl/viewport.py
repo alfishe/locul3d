@@ -54,6 +54,38 @@ except ImportError:
     HAS_PANORAMA = False
 
 
+# ── 2D convex hull (Andrew's monotone chain) ────────────────────────
+# Used by the box-aligned shader fade to compute the polygon formed
+# by rays from the camera through the AoI bbox's 8 corners.  Returns
+# vertices in CCW order.  Pure-Python; ~30 ns per point — fine for
+# 8-point inputs called once per draw call.
+
+def _convex_hull_2d(points) -> list:
+    """Return the 2D convex hull of *points* in counter-clockwise order.
+
+    *points* may be a numpy array of shape (N, 2) or any iterable of
+    (x, y) tuples.  Empty input returns an empty list.
+    """
+    pts = sorted({(float(p[0]), float(p[1])) for p in points})
+    if len(pts) <= 1:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
 # Module-level vsync default. Set by viewer/editor entry points
 # (or via locul3d.rendering.gl.viewport.set_default_vsync()) BEFORE
 # any viewport is constructed — the swap interval is baked into the
@@ -112,18 +144,38 @@ class BaseGLViewport(QOpenGLWidget):
         self.cam_target = np.array([0.0, 0.0, 0.0])
         self.cam_fov = 45.0
 
-        # Cone-shadow fade for point layers (shader-driven, optional).
-        # When enabled, the renderer fades only points that lie inside
-        # the cone swept from the camera through the area-of-interest
-        # bounding sphere AND in front of the AoI's near edge — so
-        # only "occluders" of the AoI dim, not the whole foreground.
+        # Box-aligned silhouette fade for point layers (shader-driven,
+        # optional).  When enabled, the renderer fades only points
+        # whose screen-space projection falls inside the AoI bbox's
+        # silhouette AND that lie in front of the bbox's nearest face.
+        # Tighter than a cone — fade region exactly matches the bbox
+        # silhouette as the camera orbits, so any opaque foreground
+        # that visually overlaps the bbox always fades, while
+        # everything else stays untouched.
         self.fade_enable: bool = False
         self.fade_alpha_mul: float = 0.5
-        self.fade_band: float = 0.5  # smoothstep half-band, world units
-        # AoI specified in world space. Transformed to view space per
-        # frame so the cone tracks the camera as it orbits.
-        self.fade_aoi_center: np.ndarray = np.zeros(3, dtype=np.float64)
-        self.fade_aoi_radius: float = 0.0
+        # Smoothstep softness in NDC units (NDC range is -1..+1).
+        # 0.02 ≈ 1% of the screen — gentle edge.
+        self.fade_band: float = 0.02
+        # Multiplier on the bbox half-extents BEFORE projecting.
+        # 1.0 = exact silhouette; 1.3 = 30% larger so the cone
+        # extends a bit beyond the bbox edges (catches ceiling
+        # beams that are visually adjacent to the bbox but lie
+        # geometrically just outside the strict cone).
+        self.fade_expansion: float = 1.0
+        # AoI as an axis-aligned bounding box in WORLD space.
+        # The 8 corners are projected through the live MVP per draw.
+        self.fade_aoi_min: np.ndarray = np.zeros(3, dtype=np.float64)
+        self.fade_aoi_max: np.ndarray = np.zeros(3, dtype=np.float64)
+        # Debug overlay: when True, draws the computed silhouette as
+        # a thin yellow polygon over the scene so the user can see
+        # exactly where the fade region is.  Diagnostic only.
+        self.fade_debug_overlay: bool = False
+        # Stash of the most recent projected hull (in NDC) so the
+        # debug overlay can draw it after the scene rendering loop.
+        self._fade_debug_hull_ndc: list = []
+        # All 8 projected corners (NDC), for diagnostic dots.
+        self._fade_debug_corners_ndc: list = []
         self._point_shader = None    # lazily created in initializeGL
 
         # GPU timer query state — true GPU paint duration without
@@ -424,6 +476,136 @@ class BaseGLViewport(QOpenGLWidget):
             self._paint_peak_ms = new_peak
 
             self._paint_in_progress = False
+
+    # --- Fade silhouette debug overlay ---
+
+    def _draw_fade_debug_overlay(self):
+        """Draw fade silhouette diagnostics on top of the scene.
+
+        Yellow line loop = the convex hull used by the shader.
+        Cyan crosses    = each of the 8 projected bbox corners.
+
+        Drawn directly in NDC via glOrtho(-1, 1, -1, 1) so the
+        debug shapes appear at the EXACT same screen positions as
+        the rasterized scene — i.e., the yellow polygon should
+        coincide pixel-perfectly with the bbox annotation outline.
+
+        Diagnostic only.  Toggled via viewport.fade_debug_overlay.
+        """
+        try:
+            from OpenGL.GL import (
+                glDisable, glEnable, glMatrixMode, glLoadIdentity,
+                glPushMatrix, glPopMatrix, glOrtho, glColor4f,
+                glBegin, glEnd, glVertex2f, glLineWidth,
+                GL_PROJECTION, GL_MODELVIEW, GL_DEPTH_TEST,
+                GL_LINE_LOOP, GL_LINES, GL_TEXTURE_2D, GL_LIGHTING,
+                glUseProgram,
+            )
+        except ImportError:
+            return
+        import math as _math
+
+        try:
+            glUseProgram(0)
+        except Exception:
+            pass
+
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
+        glDisable(GL_TEXTURE_2D)
+
+        # Yellow hull line loop — should land exactly on the bbox
+        # annotation wireframe outline.
+        if len(self._fade_debug_hull_ndc) >= 2:
+            glColor4f(1.0, 1.0, 0.0, 1.0)
+            glLineWidth(2.0)
+            glBegin(GL_LINE_LOOP)
+            for px, py in self._fade_debug_hull_ndc:
+                glVertex2f(float(px), float(py))
+            glEnd()
+
+        # Cyan crosses at each of the 8 corner projections.
+        if self._fade_debug_corners_ndc:
+            glColor4f(0.0, 1.0, 1.0, 1.0)
+            glLineWidth(2.0)
+            S = 0.015  # cross arm length in NDC units
+            glBegin(GL_LINES)
+            for px, py in self._fade_debug_corners_ndc:
+                if _math.isnan(px) or _math.isnan(py):
+                    continue
+                glVertex2f(float(px) - S, float(py))
+                glVertex2f(float(px) + S, float(py))
+                glVertex2f(float(px),     float(py) - S)
+                glVertex2f(float(px),     float(py) + S)
+            glEnd()
+
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        glPopMatrix()
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
+    # --- Camera-only view matrix (no scene correction applied) ---
+
+    def _compute_camera_view_matrix(self) -> np.ndarray:
+        """Return a 4x4 row-major camera-only view matrix.
+
+        Mirrors the eye/target/up arithmetic in _render_normal_scene's
+        gluLookAt call but skips the post-multiplied scene correction.
+        Used by the box-aligned fade to project AoI corners that are
+        already stored in *corrected* world space — projecting them
+        through the live MV (which contains the correction) would
+        apply correction a second time.
+        """
+        az = math.radians(self.cam_azimuth)
+        el = math.radians(self.cam_elevation)
+        eye = np.array([
+            self.cam_target[0] + self.cam_distance * math.cos(el) * math.cos(az),
+            self.cam_target[1] + self.cam_distance * math.cos(el) * math.sin(az),
+            self.cam_target[2] + self.cam_distance * math.sin(el),
+        ], dtype=np.float64)
+        if self.cam_distance < 0.001:
+            # Panorama mode (eye == target): use a synthetic look-at.
+            look = np.array([
+                eye[0] - math.cos(el) * math.cos(az),
+                eye[1] - math.cos(el) * math.sin(az),
+                eye[2] - math.sin(el),
+            ], dtype=np.float64)
+        else:
+            look = np.asarray(self.cam_target, dtype=np.float64)
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+        f = look - eye
+        nf = np.linalg.norm(f)
+        if nf < 1e-9:
+            return np.eye(4, dtype=np.float64)
+        f /= nf
+        s = np.cross(f, up)
+        ns = np.linalg.norm(s)
+        if ns < 1e-9:
+            # camera direction parallel to up — pick an arbitrary side
+            s = np.array([1.0, 0.0, 0.0])
+        else:
+            s /= ns
+        u = np.cross(s, f)
+
+        m = np.eye(4, dtype=np.float64)
+        m[0, 0:3] = s
+        m[1, 0:3] = u
+        m[2, 0:3] = -f
+        m[0, 3] = -np.dot(s, eye)
+        m[1, 3] = -np.dot(u, eye)
+        m[2, 3] =  np.dot(f, eye)
+        return m
 
     # --- Render-size helpers (handles offscreen FBO override) ---
 
@@ -832,6 +1014,12 @@ class BaseGLViewport(QOpenGLWidget):
         if self._correction_diag is not None:
             self._draw_correction_diagnostics()
 
+        # Fade debug overlay — draws the projected hull as a thin
+        # yellow polygon over the scene so the user can see exactly
+        # where the shader thinks the silhouette is.
+        if self.fade_debug_overlay and self._fade_debug_hull_ndc:
+            self._draw_fade_debug_overlay()
+
     def _render_scene_from_station(self, pano_layer):
         """Render the scene from a panorama station's viewpoint.
 
@@ -987,41 +1175,194 @@ class BaseGLViewport(QOpenGLWidget):
                     glEnableClientState(GL_COLOR_ARRAY)
                     glColorPointer(3, GL_FLOAT, rgb_stride, None)
 
-        # Optional cone-shadow fade shader (GLSL 1.20).  When active it
-        # writes the per-fragment alpha directly, so we use the
-        # standard SRC_ALPHA blend instead of the CONSTANT_ALPHA trick
-        # the fixed-function path relies on.
+        # Optional box-aligned silhouette fade shader (GLSL 1.20).
+        # When active it writes the per-fragment alpha directly, so we
+        # use the standard SRC_ALPHA blend instead of the
+        # CONSTANT_ALPHA trick the fixed-function path relies on.
         shader = self._point_shader
+        bb_min = self.fade_aoi_min
+        bb_max = self.fade_aoi_max
+        bb_extent = bb_max - bb_min
         use_shader = (
             self.fade_enable
-            and self.fade_aoi_radius > 0.0
+            and bool(np.all(bb_extent > 0.0))
             and shader is not None
             and shader.available
         )
 
         if use_shader:
-            # Transform AoI world-space center to view space using
-            # the current modelview matrix.  GL stores it as a
-            # column-major 4x4 — so np takes the transpose for the
-            # usual row-vector multiply.
-            mv = glGetFloatv(GL_MODELVIEW_MATRIX)  # 4x4 column-major
-            mv_np = np.asarray(mv, dtype=np.float64).T
-            cw = np.array([self.fade_aoi_center[0],
-                           self.fade_aoi_center[1],
-                           self.fade_aoi_center[2],
-                           1.0], dtype=np.float64)
-            cv = mv_np @ cw  # view-space center
+            # IMPORTANT: bbox annotations are drawn by the editor
+            # using the *pre-correction* modelview matrix (saved as
+            # self._pre_correction_matrix in _draw_global_overlays).
+            # That's the matrix that puts the annotation at the
+            # screen location the user authored it for.  We project
+            # our 8 corners through the SAME matrix to keep the
+            # silhouette aligned with the rendered bbox.
+            #
+            # Use the SAME math project_points_to_screen uses
+            # elsewhere in the codebase (utils/math.py) so any
+            # convention bugs are shared and easy to find.
+
+            pre_corr = getattr(self, "_pre_correction_matrix", None)
+            mv_arr = (np.asarray(pre_corr, dtype=np.float64)
+                      if pre_corr is not None
+                      else self._compute_camera_view_matrix().T)
+            # mv_arr should be the column-major (i.e. M.T in numpy)
+            # form that the rest of the codebase uses.
+            if mv_arr.ndim == 1:
+                mv_arr = mv_arr.reshape(4, 4)
+            proj_arr = np.asarray(
+                glGetFloatv(GL_PROJECTION_MATRIX), dtype=np.float64
+            )
+            if proj_arr.ndim == 1:
+                proj_arr = proj_arr.reshape(4, 4)
+
+            # Optional expansion: scale the bbox around its center
+            # by `fade_expansion` BEFORE projection.  Lets the user
+            # widen the fade region beyond the strict bbox cone to
+            # catch foreground beams that are visually adjacent to
+            # the bbox but technically outside its silhouette.
+            exp = max(1e-3, float(self.fade_expansion))
+            if exp != 1.0:
+                center = 0.5 * (bb_min + bb_max)
+                half = 0.5 * (bb_max - bb_min) * exp
+                bb_min_p = center - half
+                bb_max_p = center + half
+            else:
+                bb_min_p = bb_min
+                bb_max_p = bb_max
+
+            # Build the 8 bbox corners as homogeneous world points
+            # (rows of an (8, 4) matrix; w = 1).
+            x0, y0, z0 = bb_min_p
+            x1, y1, z1 = bb_max_p
+            corners_w = np.array([
+                [x0, y0, z0, 1.0],
+                [x1, y0, z0, 1.0],
+                [x0, y1, z0, 1.0],
+                [x1, y1, z0, 1.0],
+                [x0, y0, z1, 1.0],
+                [x1, y0, z1, 1.0],
+                [x0, y1, z1, 1.0],
+                [x1, y1, z1, 1.0],
+            ], dtype=np.float64)
+
+            # Combined MVP in column-major form (matches
+            # project_points_to_screen):
+            #   mvp_cm = (proj.T @ mv.T).T
+            # Then `pts @ mvp_cm` gives clip-space rows, identical
+            # to what project_points_to_screen does internally.
+            mvp_cm = (proj_arr.T @ mv_arr.T).T
+            corners_c = corners_w @ mvp_cm
+
+            # View-space (just modelview applied, no projection).
+            # mv_arr is column-major (= M_mv.T in numpy terms), so
+            # `corners_w @ mv_arr` evaluates to
+            #   corners_w[i] @ M_mv.T = (M_mv @ corners_w[i]^T)^T
+            # which IS the view-space row.  No extra .T — the OLD
+            # code was right but I was about to add another transpose
+            # in the rewrite that broke near_view_z extraction and
+            # collapsed the shader's front-fade test entirely.
+            corners_v = corners_w @ mv_arr
+            ws = corners_c[:, 3]
+            in_front = ws > 1e-5
+
+            hull_edges = []
+            aoi_valid = False
+            near_view_z = 0.0
+            far_view_z = 0.0
+
+            # Stash all 8 corner projections (or NaN where w<=0) for
+            # the debug overlay — useful to see exactly where each
+            # corner lands even when the hull is degenerate.
+            self._fade_debug_corners_ndc = []
+            for i in range(8):
+                if ws[i] > 1e-5:
+                    nx = corners_c[i, 0] / ws[i]
+                    ny = corners_c[i, 1] / ws[i]
+                    self._fade_debug_corners_ndc.append((float(nx), float(ny)))
+                else:
+                    self._fade_debug_corners_ndc.append((float('nan'), float('nan')))
+
+            if in_front.any():
+                front_idx = np.where(in_front)[0]
+                ndc_pts = corners_c[front_idx, :2] / corners_c[front_idx, 3:4]
+
+                # If the bbox straddles the near plane the visible
+                # silhouette can extend off-screen on every side —
+                # use the full screen rectangle (4 axis-aligned edges).
+                if not in_front.all():
+                    pts_for_hull = np.array([
+                        [-1.0, -1.0], [ 1.0, -1.0],
+                        [ 1.0,  1.0], [-1.0,  1.0],
+                    ])
+                else:
+                    pts_for_hull = ndc_pts
+
+                hull = _convex_hull_2d(pts_for_hull)
+                # Stash for debug overlay (if enabled).
+                self._fade_debug_hull_ndc = list(hull)
+                if len(hull) >= 3:
+                    # Convert each edge of the CCW hull to a line
+                    # equation `a*x + b*y + c >= 0` for "inside".
+                    for i in range(len(hull)):
+                        p1 = hull[i]
+                        p2 = hull[(i + 1) % len(hull)]
+                        dx = p2[0] - p1[0]
+                        dy = p2[1] - p1[1]
+                        # Inward normal for CCW: (-dy, dx)
+                        nx = -dy
+                        ny = dx
+                        c = -(nx * p1[0] + ny * p1[1])
+                        hull_edges.append((nx, ny, c))
+
+                    view_zs = corners_v[in_front, 2]
+                    near_view_z = float(view_zs.max())
+                    far_view_z  = float(view_zs.min())
+                    if near_view_z >= 0.0:
+                        near_view_z = -1e-4
+                    if far_view_z >= near_view_z:
+                        far_view_z = near_view_z - 1e-4
+                    aoi_valid = True
+
             shader.bind()
             shader.set_uniforms(
-                aoi_center_view=(float(cv[0]), float(cv[1]), float(cv[2])),
-                aoi_radius=float(self.fade_aoi_radius),
+                hull_edges=hull_edges,
+                aoi_near_view_z=near_view_z,
+                aoi_far_view_z=far_view_z,
+                aoi_valid=aoi_valid,
                 fade_band=float(self.fade_band),
                 fade_mul=float(self.fade_alpha_mul),
                 layer_alpha=float(layer.opacity),
                 fade_enable=True,
+                point_size=float(base_size),
             )
+            # Some drivers (Apple Metal) ignore the fixed-function
+            # glPointSize() once a shader program is bound and use
+            # gl_PointSize from the vertex shader instead.  We
+            # enable GL_VERTEX_PROGRAM_POINT_SIZE so writes from
+            # our vertex shader take effect.  Restored after the
+            # draw so subsequent fixed-function paths still use
+            # glPointSize().
+            try:
+                from OpenGL.GL import GL_VERTEX_PROGRAM_POINT_SIZE
+                glEnable(GL_VERTEX_PROGRAM_POINT_SIZE)
+            except Exception:
+                pass
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            # GL_POINT_SMOOTH + blend on antialiases point edges,
+            # producing soft round sprites that look like "lower
+            # resolution" because each point covers less screen area.
+            # The no-fade path leaves blend OFF for opaque layers
+            # specifically to suppress this. We need blend ON for
+            # the shader fade to composite alpha — so disable
+            # GL_POINT_SMOOTH for the duration of the shader draw to
+            # keep points crisp.  Restored after the draw below.
+            try:
+                glDisable(GL_POINT_SMOOTH)
+            except Exception:
+                pass
             needs_blend = False  # restore handled below
             shader_was_bound = True
         else:
@@ -1046,6 +1387,20 @@ class BaseGLViewport(QOpenGLWidget):
 
         if shader_was_bound:
             shader.unbind()
+            # Restore GL_POINT_SMOOTH that we disabled before the
+            # shader draw so subsequent layers / overlays render
+            # with the same antialiasing as before.
+            try:
+                glEnable(GL_POINT_SMOOTH)
+            except Exception:
+                pass
+            # Disable GL_VERTEX_PROGRAM_POINT_SIZE so the next
+            # fixed-function draw uses glPointSize() again.
+            try:
+                from OpenGL.GL import GL_VERTEX_PROGRAM_POINT_SIZE
+                glDisable(GL_VERTEX_PROGRAM_POINT_SIZE)
+            except Exception:
+                pass
         if needs_blend:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 

@@ -82,23 +82,38 @@ async def _get_render_mode(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+def _fade_state(vp) -> dict:
+    import numpy as _np
+    bb_min = getattr(vp, "fade_aoi_min", _np.zeros(3))
+    bb_max = getattr(vp, "fade_aoi_max", _np.zeros(3))
+    hull = getattr(vp, "_fade_debug_hull_ndc", None) or []
+    corners = getattr(vp, "_fade_debug_corners_ndc", None) or []
+    return {
+        "enable": bool(getattr(vp, "fade_enable", False)),
+        "alpha_mul": float(getattr(vp, "fade_alpha_mul", 0.5)),
+        "band": float(getattr(vp, "fade_band", 0.02)),
+        "expansion": float(getattr(vp, "fade_expansion", 1.0)),
+        "aoi_min": bb_min.tolist(),
+        "aoi_max": bb_max.tolist(),
+        "debug_overlay": bool(getattr(vp, "fade_debug_overlay", False)),
+        "last_hull_ndc": [[float(x), float(y)] for (x, y) in hull],
+        "last_corners_ndc": [
+            [None if (isinstance(x, float) and x != x) else float(x),
+             None if (isinstance(y, float) and y != y) else float(y)]
+            for (x, y) in corners
+        ],
+        "available": bool(
+            getattr(vp, "_point_shader", None)
+            and vp._point_shader.available
+        ),
+    }
+
+
 async def _get_fade(request: web.Request) -> web.Response:
     dispatcher: CommandDispatcher = request.app["dispatcher"]
     bridge = dispatcher._bridge
     def _read():
-        vp = dispatcher._viewport
-        center = getattr(vp, "fade_aoi_center", None)
-        return {
-            "enable": bool(getattr(vp, "fade_enable", False)),
-            "alpha_mul": float(getattr(vp, "fade_alpha_mul", 0.5)),
-            "band": float(getattr(vp, "fade_band", 0.5)),
-            "aoi_center": center.tolist() if center is not None else [0,0,0],
-            "aoi_radius": float(getattr(vp, "fade_aoi_radius", 0.0)),
-            "available": bool(
-                getattr(vp, "_point_shader", None)
-                and vp._point_shader.available
-            ),
-        }
+        return _fade_state(dispatcher._viewport)
     result = await bridge.invoke_on_qt(_read)
     return web.json_response(result)
 
@@ -116,25 +131,61 @@ async def _set_fade(request: web.Request) -> web.Response:
             vp.fade_alpha_mul = float(data["alpha_mul"])
         if "band" in data:
             vp.fade_band = float(data["band"])
-        if "aoi_center" in data:
-            vp.fade_aoi_center = _np.asarray(
-                data["aoi_center"], dtype=_np.float64
-            )
-        if "aoi_radius" in data:
-            vp.fade_aoi_radius = float(data["aoi_radius"])
-        vp.update()
-        return {
-            "status": "ok",
-            "enable": vp.fade_enable,
-            "alpha_mul": vp.fade_alpha_mul,
-            "band": vp.fade_band,
-            "aoi_center": vp.fade_aoi_center.tolist(),
-            "aoi_radius": vp.fade_aoi_radius,
-            "available": bool(
-                getattr(vp, "_point_shader", None)
-                and vp._point_shader.available
-            ),
-        }
+        if "expansion" in data:
+            vp.fade_expansion = float(data["expansion"])
+        if "debug_overlay" in data:
+            vp.fade_debug_overlay = bool(data["debug_overlay"])
+
+        # Two ways to specify the AoI box:
+        #   1) explicit min + max  (preferred)
+        #   2) center + size       (auto-derived bbox)
+        #   3) center + radius     (legacy: cube of side 2*radius — back-compat)
+        if "aoi_min" in data and "aoi_max" in data:
+            vp.fade_aoi_min = _np.asarray(data["aoi_min"], dtype=_np.float64)
+            vp.fade_aoi_max = _np.asarray(data["aoi_max"], dtype=_np.float64)
+        elif "aoi_center" in data and "aoi_size" in data:
+            c = _np.asarray(data["aoi_center"], dtype=_np.float64)
+            s = _np.asarray(data["aoi_size"], dtype=_np.float64)
+            vp.fade_aoi_min = c - s * 0.5
+            vp.fade_aoi_max = c + s * 0.5
+        elif "aoi_center" in data and "aoi_radius" in data:
+            c = _np.asarray(data["aoi_center"], dtype=_np.float64)
+            r = float(data["aoi_radius"])
+            vp.fade_aoi_min = c - r
+            vp.fade_aoi_max = c + r
+        elif "aoi_center" in data:
+            # center alone — keep current extent, just shift it
+            c = _np.asarray(data["aoi_center"], dtype=_np.float64)
+            half = (vp.fade_aoi_max - vp.fade_aoi_min) * 0.5
+            vp.fade_aoi_min = c - half
+            vp.fade_aoi_max = c + half
+
+        # Synchronous repaint so the new fade settings are visible
+        # immediately. update() schedules a paint event for "later"
+        # which is fine inside an animation loop but feels broken
+        # when the user PUTs an alpha_mul change manually.
+        try:
+            vp.repaint()
+        except Exception:
+            vp.update()
+
+        out = {"status": "ok"}
+        out.update(_fade_state(vp))
+
+        # Diagnostic hint — explain why a request might appear to do
+        # nothing.  Common cases: fade_enable is False, or the AoI
+        # bbox is degenerate (extent zero on any axis).
+        hints = []
+        if not vp.fade_enable:
+            hints.append("fade is currently disabled — send "
+                         "{\"enable\": true} to activate")
+        extent = vp.fade_aoi_max - vp.fade_aoi_min
+        if not bool((extent > 0.0).all()):
+            hints.append("AoI bbox is degenerate (extent has a zero "
+                         "axis) — send aoi_min + aoi_max to set it")
+        if hints:
+            out["hints"] = hints
+        return out
     result = await bridge.invoke_on_qt(_apply)
     return web.json_response(result)
 

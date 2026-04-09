@@ -37,7 +37,7 @@ from OpenGL.GL import (
     glShaderSource,
     glUniform1f,
     glUniform1i,
-    glUniform3f,
+    glUniform3fv,
     glUseProgram,
 )
 
@@ -46,86 +46,122 @@ log = logging.getLogger(__name__)
 
 _VERT_SRC = """\
 #version 120
-// Pass view-space position to the fragment shader. We need the full
-// vec3 (not just Z) because the fade test is a cone, not a plane.
+// Pass view-space position AND clip-space position to the fragment
+// shader.  The box-aligned fade test uses clip-space (post-projection)
+// coordinates to check whether a fragment falls inside the AoI bbox's
+// screen-space silhouette, and view-space Z to check whether it lies
+// in front of the bbox's nearest face.
+//
+// Also writes gl_PointSize from a uniform.  When a shader program is
+// bound, some drivers (notably macOS Metal) ignore the fixed-function
+// glPointSize() and fall back to 1.0 unless the vertex shader writes
+// gl_PointSize explicitly — which would otherwise make points appear
+// 1 pixel wide and look like "lower density" when fade is enabled.
+uniform float uPointSize;
+
 varying vec3 vViewPos;
+varying vec4 vClipPos;
 varying vec4 vColor;
 void main() {
     vec4 viewPos = gl_ModelViewMatrix * gl_Vertex;
     vViewPos = viewPos.xyz;
-    vColor   = gl_Color;
     gl_Position = gl_ProjectionMatrix * viewPos;
+    vClipPos = gl_Position;
+    vColor = gl_Color;
+    gl_PointSize = uPointSize;
 }
 """
 
-# The fragment shader fades only points that lie INSIDE the cone swept
-# from the camera (view-space origin) through the bounding sphere of
-# the area of interest, AND in front of the sphere's near edge.
-# Everything outside the cone or behind the AoI keeps its base alpha.
+# Box-aligned fade with a mirror back-fade.  Per draw call, Python
+# projects the AoI bbox's 8 corners through the live MVP and computes:
+#   * uAoiNdcMin / uAoiNdcMax — screen-space AABB of the projection
+#   * uAoiNearViewZ          — least-negative view-space Z (the face
+#                              of the bbox closest to the camera)
+#   * uAoiFarViewZ           — most-negative view-space Z  (the face
+#                              of the bbox farthest from the camera)
 #
-# Geometry (view space, camera at origin, looking down -Z):
+# Three regions for any fragment whose screen-space position is
+# inside the bbox silhouette rectangle:
 #
-#     camera                    AoI sphere (center C, radius R)
-#       o ─────axis n──────────── O ─────────►
-#        \\                     /
-#         \\__cone half-angle __/
-#         half_angle = asin(R / |C|)
+#   FRONT  — vertex is closer to the camera than the bbox front face.
+#            These are the actual occluders.  Faded by `fade_mul`.
 #
-# A vertex V is inside the cone iff
-#     angle(V, n) <= half_angle
-# i.e.
-#     dot(normalize(V), n) >= cos(half_angle)
-# It's "in front of" the AoI iff
-#     |V| < |C| - R    (closer to the camera than the near edge)
+#   INSIDE — vertex lies within the bbox depth range (between the
+#            front and back faces). These are AoI vertices we want
+#            to keep at full opacity.  No fade applied.
+#
+#   BACK   — vertex is farther from the camera than the bbox back
+#            face.  Dense backgrounds visible through the bbox can
+#            create the illusion of unfaded "ceiling" behind it.
+#            Faded by a softer mid-strength so the AoI still pops
+#            without the back wall blending into the foreground.
+#            Strength = mix(1, fade_mul, 0.5) — the midway alpha
+#            multiplier between "no fade" and "full fade".
+#
+# All three tests use the same NDC silhouette so the fade region
+# always exactly tracks the bbox as the camera orbits.  No 3D shadow
+# geometry is rendered anywhere.
 _FRAG_SRC = """\
 #version 120
-uniform vec3  uAoiCenterView;  // AoI sphere center in view space
-uniform float uAoiRadius;      // AoI sphere radius (world units)
-uniform float uFadeBand;       // smoothstep softness (world units)
-uniform float uFadeMul;        // alpha multiplier for occluders
-uniform float uLayerAlpha;     // base layer opacity
-uniform int   uFadeEnable;     // 0 = pass-through
+// Convex hull of the 8 projected bbox corners (in NDC).  Each edge
+// is a line equation `a*x + b*y + c = 0` with the CCW convention
+// that "inside the polygon" means a*x + b*y + c >= 0.  Unused
+// slots are set to (0, 0, 1) → always inside, no contribution.
+#define HULL_MAX 8
+uniform vec3  uHullEdges[HULL_MAX];
+uniform int   uHullEdgeCount;
+uniform float uAoiNearViewZ;  // least-negative view-space Z (front face)
+uniform float uAoiFarViewZ;   // most-negative view-space Z  (back face)
+uniform float uFadeBand;      // smoothstep softness (NDC units)
+uniform float uFadeMul;       // alpha multiplier for front occluders
+uniform float uLayerAlpha;    // base layer opacity
+uniform int   uFadeEnable;    // 0 = pass-through, 1 = apply fade
+uniform int   uAoiValid;      // 0 = invalid (camera inside bbox etc.)
 
 varying vec3 vViewPos;
+varying vec4 vClipPos;
 varying vec4 vColor;
 
 void main() {
     float a = vColor.a * uLayerAlpha;
 
-    if (uFadeEnable == 1 && uAoiRadius > 0.0) {
-        float distC = length(uAoiCenterView);
-        // Guard: if camera is inside the AoI sphere there's no
-        // meaningful "in front of" test — skip fading.
-        if (distC > uAoiRadius + 1e-3) {
-            // Cone axis (camera→AoI center) and its half-angle.
-            vec3  axis     = uAoiCenterView / distC;
-            float cosHalf  = sqrt(max(0.0, 1.0 - (uAoiRadius * uAoiRadius)
-                                                / (distC * distC)));
+    if (uFadeEnable == 1 && uAoiValid == 1 && vClipPos.w > 1e-5) {
+        vec2 ndc = vClipPos.xy / vClipPos.w;
 
-            float distV = length(vViewPos);
-            // Avoid div-by-zero for vertices coincident with camera.
-            if (distV > 1e-4) {
-                vec3  vDir   = vViewPos / distV;
-                float cosVA  = dot(vDir, axis);
-
-                // 1) Inside the cone, with a small angular smoothstep
-                //    so the edge isn't a hard step.
-                float angBand = uAoiRadius * 0.5 / distC;  // ≈ rad
-                float coneT   = smoothstep(cosHalf - angBand,
-                                           cosHalf + angBand,
-                                           cosVA);
-
-                // 2) In front of the AoI's near edge (with smoothstep
-                //    over a fadeBand-thick shell).
-                float nearEdge = distC - uAoiRadius;
-                float depthT   = 1.0 - smoothstep(nearEdge - uFadeBand,
-                                                  nearEdge + uFadeBand,
-                                                  distV);
-
-                float t = coneT * depthT;
-                a *= mix(1.0, uFadeMul, t);
-            }
+        // Inside-hull test: for each edge compute the signed distance
+        // to the half-plane.  The minimum across all edges is the
+        // signed distance to the boundary; positive = inside.
+        // GLSL 1.20 requires constant loop bounds, so we walk the
+        // full HULL_MAX and skip unused slots (which are set to a
+        // tautological "always inside" line equation).
+        float minDist = 1.0;
+        for (int i = 0; i < HULL_MAX; i++) {
+            if (i >= uHullEdgeCount) break;
+            float d = uHullEdges[i].x * ndc.x
+                    + uHullEdges[i].y * ndc.y
+                    + uHullEdges[i].z;
+            minDist = min(minDist, d);
         }
+        // Smoothstep across the boundary so the edge isn't a hard
+        // step. uFadeBand is the half-band in NDC units.
+        float silhouette = smoothstep(-uFadeBand, uFadeBand, minDist);
+
+        // FRONT: vertex closer to camera than bbox front face.
+        float front = step(uAoiNearViewZ, vViewPos.z);
+        // BACK: vertex deeper than bbox back face.
+        float back  = step(vViewPos.z, uAoiFarViewZ);
+
+        // Mid-strength multiplier for the back region: midway
+        // between "no fade" (1.0) and "full fade" (uFadeMul).
+        float backMul = mix(1.0, uFadeMul, 0.5);
+
+        float frontFactor = silhouette * front;
+        float backFactor  = silhouette * back;
+
+        float fadedAlpha = a;
+        fadedAlpha = mix(fadedAlpha, fadedAlpha * uFadeMul, frontFactor);
+        fadedAlpha = mix(fadedAlpha, fadedAlpha * backMul,  backFactor);
+        a = fadedAlpha;
     }
 
     gl_FragColor = vec4(vColor.rgb, a);
@@ -168,9 +204,17 @@ class PointFadeShader:
             glDeleteShader(vs)
             glDeleteShader(fs)
             self._program = prog
-            for name in ("uAoiCenterView", "uAoiRadius", "uFadeBand",
-                         "uFadeMul", "uLayerAlpha", "uFadeEnable"):
+            for name in ("uHullEdges", "uHullEdgeCount",
+                         "uAoiNearViewZ", "uAoiFarViewZ",
+                         "uFadeBand", "uFadeMul", "uLayerAlpha",
+                         "uFadeEnable", "uAoiValid", "uPointSize"):
                 self._loc[name] = glGetUniformLocation(prog, name)
+            # Each array element gets its own location too — query
+            # the first slot's location and assume contiguous storage
+            # (which the GLSL spec guarantees for plain arrays).
+            base = glGetUniformLocation(prog, "uHullEdges[0]")
+            if base != -1:
+                self._loc["uHullEdges"] = base
             log.info("PointFadeShader compiled (program=%d)", prog)
             return True
         except Exception as exc:
@@ -204,22 +248,45 @@ class PointFadeShader:
     def unbind(self) -> None:
         glUseProgram(0)
 
+    HULL_MAX = 8
+
     def set_uniforms(
         self,
         *,
-        aoi_center_view: tuple[float, float, float],
-        aoi_radius: float,
+        hull_edges,            # iterable of (a, b, c) line equations
+        aoi_near_view_z: float,
+        aoi_far_view_z: float,
+        aoi_valid: bool,
         fade_band: float,
         fade_mul: float,
         layer_alpha: float,
         fade_enable: bool,
+        point_size: float,
     ) -> None:
         if not self.available:
             return
-        cx, cy, cz = aoi_center_view
-        glUniform3f(self._loc["uAoiCenterView"], cx, cy, cz)
-        glUniform1f(self._loc["uAoiRadius"], float(aoi_radius))
+        # Pad the hull edges out to HULL_MAX with a tautological
+        # "always inside" line equation (a=0, b=0, c=1 means any
+        # (x,y) yields 1 ≥ 0).  This lets the shader run a fixed
+        # loop count which GLSL 1.20 requires.
+        edges = list(hull_edges)[: self.HULL_MAX]
+        count = len(edges)
+        while len(edges) < self.HULL_MAX:
+            edges.append((0.0, 0.0, 1.0))
+        flat = []
+        for a, b, c in edges:
+            flat.extend((float(a), float(b), float(c)))
+        loc = self._loc.get("uHullEdges", -1)
+        if loc != -1:
+            glUniform3fv(loc, self.HULL_MAX, flat)
+        glUniform1i(self._loc["uHullEdgeCount"], int(count))
+        glUniform1f(self._loc["uAoiNearViewZ"], float(aoi_near_view_z))
+        glUniform1f(self._loc["uAoiFarViewZ"], float(aoi_far_view_z))
         glUniform1f(self._loc["uFadeBand"], float(fade_band))
         glUniform1f(self._loc["uFadeMul"], float(fade_mul))
         glUniform1f(self._loc["uLayerAlpha"], float(layer_alpha))
         glUniform1i(self._loc["uFadeEnable"], 1 if fade_enable else 0)
+        glUniform1i(self._loc["uAoiValid"], 1 if aoi_valid else 0)
+        loc_size = self._loc.get("uPointSize", -1)
+        if loc_size != -1:
+            glUniform1f(loc_size, float(point_size))

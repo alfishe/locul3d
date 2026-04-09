@@ -98,8 +98,10 @@ def main():
                          "and target (50%% alpha by default)")
     ap.add_argument("--fade-mul", type=float, default=0.4,
                     help="Alpha multiplier for faded points (0..1)")
-    ap.add_argument("--fade-band", type=float, default=0.8,
-                    help="Smoothstep half-band around target (m)")
+    ap.add_argument("--fade-band", type=float, default=0.02,
+                    help="Smoothstep half-band on the bbox silhouette "
+                         "edge, in NDC units (NDC range -1..+1). "
+                         "Default 0.02 ≈ 1%% of the screen.")
     ap.add_argument("--max-fps", type=float, default=125.0,
                     help="Realtime FPS CEILING (default 125 — matches "
                          "the engine tick rate). The adaptive controller "
@@ -250,16 +252,18 @@ def main():
     requests.put(f"{API}/camera/azimuth", json={"value": 0.0})
 
     # Optional shader fade for points occluding the AoI.  Fade is a
-    # cone from the camera through the bbox's bounding sphere — only
-    # points inside that cone AND in front of the AoI's near edge are
-    # dimmed, so the AoI itself stays full-opacity.
+    # box-aligned silhouette test: the bbox's 8 corners are projected
+    # to NDC each frame, and any vertex whose screen position falls
+    # inside the resulting screen-space rectangle AND lies in front
+    # of the bbox's nearest face gets its alpha multiplied by
+    # `alpha_mul`. The AoI itself stays full-opacity.
     if args.fade:
         r = requests.put(f"{API}/viewport/fade", json={
             "enable": True,
             "alpha_mul": args.fade_mul,
             "band": args.fade_band,
-            "aoi_center": center,
-            "aoi_radius": radius,
+            "aoi_min": bb_min,
+            "aoi_max": bb_max,
         }, timeout=5)
         if r.status_code == 200:
             info = r.json()
