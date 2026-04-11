@@ -193,15 +193,46 @@ void main() {
         float behindBbox  = hit * (1.0 - smoothstep(1.0 - eps_high,
                                                     1.0 - eps_low, tExit));
 
-        if (uDiscardCulled == 1 && inFrontCone > 0.5) {
-            discard;
-        }
-
+        // Unified fade/discard algorithm — one continuous formula
+        // for the whole 360° rotation so vertices restore smoothly
+        // when they fall out of the culling volume.
+        //
+        // Fade mode   : front occluders fade toward uFadeMul (partial
+        //               transparency — classic ghost-in-front look).
+        // Discard mode: front occluders fade toward 0 (completely
+        //               invisible) and the negligibly-faint tail gets
+        //               `discard`-ed so it doesn't write depth and
+        //               occlude geometry behind the cull volume.
+        //
+        // The previous implementation branched on
+        // ``uDiscardCulled==1 && inFrontCone>0.5`` and discarded
+        // above the threshold while smooth-fading below it — that
+        // hybrid left a 0.7·a → 0 cliff exactly at inFrontCone=0.5.
+        // For coplanar vertex clusters (roofs, ceilings, walls) every
+        // vertex crosses the threshold on the same frame as the
+        // camera orbits, turning the per-vertex cliff into a
+        // frame-wide visible step-change at specific azimuths
+        // (~187° in the user's flyover).  Keeping the alpha curve
+        // continuous across the whole smoothstep band spreads the
+        // visibility change over a wider azimuth window and
+        // eliminates the step.  Do NOT reintroduce a hard
+        // ``inFrontCone>threshold`` discard without understanding the
+        // coplanar-cluster cliff bug.
+        float frontTarget = (uDiscardCulled == 1) ? 0.0 : uFadeMul;
         float backMul = mix(1.0, uFadeMul, 0.5);
         float fadedAlpha = a;
-        fadedAlpha = mix(fadedAlpha, fadedAlpha * uFadeMul, inFrontCone);
-        fadedAlpha = mix(fadedAlpha, fadedAlpha * backMul,  behindBbox);
+        fadedAlpha = mix(fadedAlpha, fadedAlpha * frontTarget, inFrontCone);
+        fadedAlpha = mix(fadedAlpha, fadedAlpha * backMul, behindBbox);
         a = fadedAlpha;
+
+        // Late discard: fragments whose blended alpha is below one
+        // 8-bit step contribute nothing visible but their depth
+        // writes would occlude back-layer geometry (the whole point
+        // of discard mode).  Skip them at the very tail of the
+        // fade curve so there is no cliff anywhere in the main body.
+        if (a < (1.0 / 255.0)) {
+            discard;
+        }
     }
 
     gl_FragColor = vec4(vColor.rgb, a);
