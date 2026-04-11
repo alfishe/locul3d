@@ -1443,28 +1443,23 @@ class BaseGLViewport(QOpenGLWidget):
             else:
                 glDisable(GL_BLEND)
 
-        glDrawArrays(GL_POINTS, 0, draw_count)
-
-        if shader_was_bound:
-            shader.unbind()
-            # Restore GL_POINT_SMOOTH that we disabled before the
-            # shader draw so subsequent layers / overlays render
-            # with the same antialiasing as before.
-            try:
-                glEnable(GL_POINT_SMOOTH)
-            except Exception:
-                pass
-            # Disable GL_VERTEX_PROGRAM_POINT_SIZE so the next
-            # fixed-function draw uses glPointSize() again.
-            # Critical on Apple Metal — leaving this enabled makes
-            # subsequent non-shader draws ignore glPointSize() and
-            # render points at 1 pixel (or whatever stale gl_PointSize
-            # the previous shader wrote).
-            try:
-                from OpenGL.GL import GL_VERTEX_PROGRAM_POINT_SIZE
-                glDisable(GL_VERTEX_PROGRAM_POINT_SIZE)
-            except Exception:
-                pass
+        try:
+            glDrawArrays(GL_POINTS, 0, draw_count)
+        finally:
+            # shader.unbind() in finally so an exception from
+            # glDrawArrays cannot leak a bound fade shader into
+            # subsequent fixed-function draws (annotations, gizmos).
+            if shader_was_bound:
+                shader.unbind()
+                try:
+                    glEnable(GL_POINT_SMOOTH)
+                except Exception:
+                    pass
+                try:
+                    from OpenGL.GL import GL_VERTEX_PROGRAM_POINT_SIZE
+                    glDisable(GL_VERTEX_PROGRAM_POINT_SIZE)
+                except Exception:
+                    pass
         if needs_blend:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 

@@ -1,5 +1,6 @@
 """Editor-specific viewport extending base with annotation capabilities."""
 
+import logging
 import math
 import numpy as np
 from typing import List, Optional
@@ -13,6 +14,8 @@ from ..core.geometry import BBoxItem, GapItem, PlaneItem
 from ..core.layer import LayerManager
 from ..rendering.gl.viewport import BaseGLViewport
 from ..utils.math import project_to_screen, project_points_to_screen, ray_from_mouse, ray_aabb_intersect
+
+log = logging.getLogger(__name__)
 
 try:
     from OpenGL.GL import *
@@ -174,7 +177,31 @@ class EditorViewport(BaseGLViewport):
             glPushMatrix()
             glLoadMatrixf(pre_corr)
 
-        # Draw annotations (bboxes are in world coordinates)
+        # Diagnostic: verify no shader is bound before annotations.
+        # Gated on fade_debug_overlay so production runs stay quiet.
+        if getattr(self, 'fade_debug_overlay', False):
+            try:
+                from OpenGL.GL import (glGetIntegerv,
+                                       GL_CURRENT_PROGRAM,
+                                       GL_FRAMEBUFFER_BINDING)
+                prog = int(glGetIntegerv(GL_CURRENT_PROGRAM))
+                fbo = int(glGetIntegerv(GL_FRAMEBUFFER_BINDING))
+                cap = getattr(self, '_capture_w', None)
+                log.info(
+                    "pre-annot: prog=%d fbo=%d cap=%s",
+                    prog, fbo, cap,
+                )
+            except Exception:
+                pass
+        # Defensive shader reset — guarantees no fade shader leaks
+        # into the fixed-function annotation draws even if the point
+        # layer path missed its unbind.
+        try:
+            from OpenGL.GL import glUseProgram
+            glUseProgram(0)
+        except Exception:
+            pass
+
         self._draw_annotations()
 
         # Draw gizmo for selected bbox (move arrows + scale handles + rotation ring)
@@ -216,11 +243,22 @@ class EditorViewport(BaseGLViewport):
             from OpenGL.GL import (glDisable, glEnable, glLineWidth, glBegin, glEnd,
                                    GL_BLEND, glBlendFunc,
                                    GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
-                                   glDepthMask, GL_FALSE, GL_TRUE)
+                                   glDepthMask, GL_FALSE, GL_TRUE,
+                                   GL_DEPTH_TEST)
         except ImportError:
             return
 
         glDisable(GL_LIGHTING)
+
+        # Fade mode: faded point-cloud occluders still write depth
+        # values, which would hide the bbox behind them on widget
+        # renders (MSAA makes this worse via per-sample depth
+        # flicker).  Draw annotations with depth test off so they
+        # stay visible through the fade region, matching --discard
+        # mode's visual result and the gizmo's always-on-top policy.
+        fade_active = bool(getattr(self, 'fade_enable', False))
+        if fade_active:
+            glDisable(GL_DEPTH_TEST)
 
         # --- Pass 1: Filled faces (back-to-front is approximate but acceptable) ---
         has_fills = any(b.visible and b.fill_opacity > 0 for b in self.annotations)
@@ -269,6 +307,8 @@ class EditorViewport(BaseGLViewport):
                 glVertex3dv(corners[b])
             glEnd()
 
+        if fade_active:
+            glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
     def _draw_gizmo(self, bbox):
