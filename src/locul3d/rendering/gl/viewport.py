@@ -768,13 +768,32 @@ class BaseGLViewport(QOpenGLWidget):
     # --- Offscreen rendering for the video recorder ---
 
     def render_to_buffer(self, width: int, height: int) -> bytes:
-        """Render the current scene to an offscreen FBO at *width × height*
-        and return the raw RGB pixel buffer (rgb24, bottom-up).
+        """Render the scene to an offscreen FBO and return the raw RGB
+        pixel buffer (rgb24, bottom-up) at *width × height*.
 
-        Used by VideoRecorder to capture frames at arbitrary resolution
-        independent of the editor window.  Must be called on the Qt
-        main thread (it makeCurrents the GL context).
+        Called on the Qt main thread by VideoRecorder.  The FBO is
+        rendered at 2x the target dimensions and downsampled with a
+        high-quality LANCZOS filter before returning so recorded
+        frames match the widget's MSAA-smoothed output.
         """
+        # Super-sample rationale (regression-prone; keep):
+        #
+        # The Qt widget's MSAA 4x framebuffer resolves point-cloud
+        # fragments with ~4x coverage averaging per pixel, which
+        # smooths low-alpha fade ghosts into the background.  An FBO
+        # with ``samples=0`` has no such averaging and renders those
+        # fragments as visible individual dots — the "accumulated
+        # ceiling/roof cleared fragments" the user reported on
+        # recorded flyovers at azimuths 90°-270° in fade mode.
+        # Rendering the FBO at 2x the target dimensions and applying
+        # a PIL LANCZOS downsample gives each output pixel the same
+        # coverage averaging the widget produces.  Do NOT simplify
+        # back to a 1x FBO — you will reintroduce the ghosting bug.
+        # Do NOT switch the downsample to glBlitFramebuffer either:
+        # ``GL_LINEAR`` on downsample is driver-dependent and on
+        # macOS Metal produces near-nearest-neighbour output that
+        # reintroduces the ghosting.  PIL LANCZOS is slower (~10ms
+        # per frame at 4K) but correct on every driver.
         from PySide6.QtOpenGL import QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat
         from PySide6.QtGui import QOpenGLContext
 
@@ -789,6 +808,17 @@ class BaseGLViewport(QOpenGLWidget):
             owned_ctx = False
 
         try:
+            try:
+                dpr = float(self.devicePixelRatioF())
+            except Exception:
+                dpr = 1.0
+            if dpr <= 0.0:
+                dpr = 1.0
+            ss_factor = max(2.0, dpr)
+            hires_w = max(1, int(round(width * ss_factor)))
+            hires_h = max(1, int(round(height * ss_factor)))
+            need_downsample = (hires_w != int(width) or hires_h != int(height))
+
             # Fresh FBO per call — no caching.  FBO state
             # accumulation between frames caused the rotation-time
             # wipe ring in recording mode, which the widened
@@ -800,18 +830,21 @@ class BaseGLViewport(QOpenGLWidget):
             # IMPORTANT: samples MUST be 0 for a readable FBO.
             fmt.setSamples(0)
             fmt.setAttachment(QOpenGLFramebufferObject.Attachment.Depth)
-            fbo = QOpenGLFramebufferObject(int(width), int(height), fmt)
+            fbo = QOpenGLFramebufferObject(hires_w, hires_h, fmt)
             if not fbo.isValid():
-                log.error("offscreen FBO %dx%d invalid", width, height)
+                log.error("offscreen FBO %dx%d invalid", hires_w, hires_h)
                 return b""
 
             fbo.bind()
             saved_w, saved_h = self._capture_w, self._capture_h
+            # Projection aspect ratio must match the TARGET resolution
+            # (same as hires since hires is a proportional scale).
+            # Keeping _capture_w/h at target size also preserves the
+            # widget letterbox math in _apply_preview_viewport.
             self._capture_w, self._capture_h = int(width), int(height)
+            self._in_capture_render = True
             try:
-                glViewport(0, 0, int(width), int(height))
-                # Run the same render path as paintGL but writing
-                # into our FBO instead of the widget's framebuffer.
+                glViewport(0, 0, hires_w, hires_h)
                 self._paint_in_progress = True
                 t0 = time.perf_counter()
                 gpu_q = self._gpu_timer_begin()
@@ -820,23 +853,35 @@ class BaseGLViewport(QOpenGLWidget):
                 finally:
                     self._gpu_timer_end(gpu_q)
 
-                # Force GPU sync before reading pixels (macOS Metal).
                 try:
                     from OpenGL.GL import glFinish
                     glFinish()
                 except Exception:
                     pass
-                # Read the colour attachment.  GL framebuffers are
-                # bottom-up; ffmpeg's ``vflip`` filter flips them.
+                # Read the colour attachment at hires.  GL framebuffers
+                # are bottom-up; ffmpeg's ``vflip`` filter flips them.
                 glPixelStorei(GL_PACK_ALIGNMENT, 1)
                 pixels = glReadPixels(
-                    0, 0, int(width), int(height),
+                    0, 0, hires_w, hires_h,
                     GL_RGB, GL_UNSIGNED_BYTE,
                 )
                 if isinstance(pixels, bytes):
-                    raw = pixels
+                    hires_raw = pixels
                 else:
-                    raw = bytes(pixels)
+                    hires_raw = bytes(pixels)
+
+                if need_downsample:
+                    from PIL import Image
+                    img = Image.frombytes(
+                        "RGB", (hires_w, hires_h), hires_raw
+                    )
+                    img = img.resize(
+                        (int(width), int(height)), Image.Resampling.LANCZOS
+                    )
+                    raw = img.tobytes()
+                else:
+                    raw = hires_raw
+
                 t_end = time.perf_counter()
                 self._last_paint_ms = (t_end - t0) * 1000.0
                 self._last_paint_end_t = t_end
@@ -847,6 +892,7 @@ class BaseGLViewport(QOpenGLWidget):
                 # without reading the git blame on this block.
                 self._capture_w, self._capture_h = saved_w, saved_h
                 self._paint_in_progress = False
+                self._in_capture_render = False
                 fbo.release()
                 glViewport(0, 0, max(1, self.width()), max(1, self.height()))
         finally:
@@ -1368,10 +1414,12 @@ class BaseGLViewport(QOpenGLWidget):
             aoi_valid = True
 
             if self.fade_debug_overlay:
+                path = "fbo" if getattr(self, '_in_capture_render', False) else "widget"
                 log.debug(
-                    "cull3d az=%.1f el=%.1f cam=(%.2f,%.2f,%.2f) "
+                    "cull3d[%s] az=%.1f el=%.1f cam=(%.2f,%.2f,%.2f) "
                     "bbox=[(%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f)] "
                     "discard=%s",
+                    path,
                     self.cam_azimuth, self.cam_elevation,
                     camera_w[0], camera_w[1], camera_w[2],
                     bb_min_p[0], bb_min_p[1], bb_min_p[2],
