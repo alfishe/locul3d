@@ -1,5 +1,4 @@
-"""Base OpenGL viewport widget."""
-
+import logging
 import math
 import time
 import numpy as np
@@ -52,9 +51,10 @@ try:
     HAS_PANORAMA = True
 except ImportError:
     HAS_PANORAMA = False
-
-
 # ── 2D convex hull (Andrew's monotone chain) ────────────────────────
+log = logging.getLogger(__name__)
+
+
 # Used by the box-aligned shader fade to compute the polygon formed
 # by rays from the camera through the AoI bbox's 8 corners.  Returns
 # vertices in CCW order.  Pure-Python; ~30 ns per point — fine for
@@ -171,6 +171,10 @@ class BaseGLViewport(QOpenGLWidget):
         # a thin yellow polygon over the scene so the user can see
         # exactly where the fade region is.  Diagnostic only.
         self.fade_debug_overlay: bool = False
+        # Culling mode: when True, fragments in the front cone are
+        # fully discarded (removed from the framebuffer) instead of
+        # alpha-faded.  Set via /viewport/fade {"discard_culled": true}.
+        self.fade_discard_culled: bool = False
         # Stash of the most recent projected hull (in NDC) so the
         # debug overlay can draw it after the scene rendering loop.
         self._fade_debug_hull_ndc: list = []
@@ -414,6 +418,7 @@ class BaseGLViewport(QOpenGLWidget):
         t0 = time.perf_counter()
         gpu_q = self._gpu_timer_begin()
         try:
+            self._apply_preview_viewport()
             self._paintGL_inner()
         except Exception:
             import traceback
@@ -482,13 +487,15 @@ class BaseGLViewport(QOpenGLWidget):
     def _draw_fade_debug_overlay(self):
         """Draw fade silhouette diagnostics on top of the scene.
 
-        Yellow line loop = the convex hull used by the shader.
-        Cyan crosses    = each of the 8 projected bbox corners.
+        Translucent yellow rect = the AABB the shader actually fades
+                                  inside (the screen area being processed)
+        Yellow border           = AABB outline
+        Green lines             = the 12 projected bbox edges (the
+                                  actual cube shape, for comparison)
+        Cyan crosses            = the 8 projected bbox corners
 
-        Drawn directly in NDC via glOrtho(-1, 1, -1, 1) so the
-        debug shapes appear at the EXACT same screen positions as
-        the rasterized scene — i.e., the yellow polygon should
-        coincide pixel-perfectly with the bbox annotation outline.
+        Drawn in NDC via glOrtho(-1, 1, -1, 1) so the debug shapes
+        appear at the same screen positions as the rasterized scene.
 
         Diagnostic only.  Toggled via viewport.fade_debug_overlay.
         """
@@ -497,9 +504,11 @@ class BaseGLViewport(QOpenGLWidget):
                 glDisable, glEnable, glMatrixMode, glLoadIdentity,
                 glPushMatrix, glPopMatrix, glOrtho, glColor4f,
                 glBegin, glEnd, glVertex2f, glLineWidth,
+                glBlendFunc,
                 GL_PROJECTION, GL_MODELVIEW, GL_DEPTH_TEST,
-                GL_LINE_LOOP, GL_LINES, GL_TEXTURE_2D, GL_LIGHTING,
-                glUseProgram,
+                GL_LINE_LOOP, GL_LINES, GL_QUADS, GL_BLEND,
+                GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                GL_TEXTURE_2D, GL_LIGHTING, glUseProgram,
             )
         except ImportError:
             return
@@ -521,18 +530,55 @@ class BaseGLViewport(QOpenGLWidget):
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        # Yellow hull line loop — should land exactly on the bbox
-        # annotation wireframe outline.
-        if len(self._fade_debug_hull_ndc) >= 2:
+        # 1) Translucent yellow fill of the AABB — the EXACT region
+        #    the shader processes.  20% alpha so it's clearly visible
+        #    without obscuring the scene below.
+        if len(self._fade_debug_hull_ndc) >= 4:
+            glColor4f(1.0, 1.0, 0.0, 0.20)
+            glBegin(GL_QUADS)
+            for px, py in self._fade_debug_hull_ndc:
+                glVertex2f(float(px), float(py))
+            glEnd()
+
+            # 2) Solid yellow border around it.
             glColor4f(1.0, 1.0, 0.0, 1.0)
-            glLineWidth(2.0)
+            glLineWidth(3.0)
             glBegin(GL_LINE_LOOP)
             for px, py in self._fade_debug_hull_ndc:
                 glVertex2f(float(px), float(py))
             glEnd()
 
-        # Cyan crosses at each of the 8 corner projections.
+        # 3) Green: the 12 projected bbox edges.  Corner indexing
+        #    matches the bbox corner order in _draw_point_layer:
+        #      0: (x0,y0,z0)  1: (x1,y0,z0)
+        #      2: (x0,y1,z0)  3: (x1,y1,z0)
+        #      4: (x0,y0,z1)  5: (x1,y0,z1)
+        #      6: (x0,y1,z1)  7: (x1,y1,z1)
+        #    12 edges = 4 bottom + 4 top + 4 vertical.
+        if (self._fade_debug_corners_ndc
+                and len(self._fade_debug_corners_ndc) == 8):
+            edges = [
+                (0, 1), (1, 3), (3, 2), (2, 0),  # bottom face
+                (4, 5), (5, 7), (7, 6), (6, 4),  # top face
+                (0, 4), (1, 5), (2, 6), (3, 7),  # vertical edges
+            ]
+            glColor4f(0.0, 1.0, 0.2, 0.9)
+            glLineWidth(2.0)
+            glBegin(GL_LINES)
+            for a, b in edges:
+                ax, ay = self._fade_debug_corners_ndc[a]
+                bx, by = self._fade_debug_corners_ndc[b]
+                if (_math.isnan(ax) or _math.isnan(ay)
+                        or _math.isnan(bx) or _math.isnan(by)):
+                    continue
+                glVertex2f(float(ax), float(ay))
+                glVertex2f(float(bx), float(by))
+            glEnd()
+
+        # 4) Cyan crosses at each of the 8 projected corners.
         if self._fade_debug_corners_ndc:
             glColor4f(0.0, 1.0, 1.0, 1.0)
             glLineWidth(2.0)
@@ -553,6 +599,69 @@ class BaseGLViewport(QOpenGLWidget):
         glPopMatrix()
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
+
+    # --- Scene correction matrix (for shader uniform upload) ---
+
+    def _build_correction_matrix(self) -> np.ndarray:
+        """Return the scene-correction transform as a 4x4 row-major numpy.
+
+        Mirrors the post-multiplied glRotatef × glRotatef × glRotatef
+        × glTranslatef chain in _render_normal_scene so that
+        ``M_corr @ v_pre = v_corrected`` matches what the GPU
+        pipeline produces for vertices.
+
+        For an identity correction this returns the 4×4 identity.
+        The shader always multiplies by this matrix, so identity is
+        harmless and avoids a per-vertex branch.
+        """
+        sc = self.scene_correction
+        if sc.is_identity:
+            return np.eye(4, dtype=np.float64)
+
+        rx = math.radians(sc.rotate_x)
+        ry = math.radians(sc.rotate_y)
+        rz = math.radians(sc.rotate_z)
+
+        Rx = np.eye(4, dtype=np.float64)
+        cx, sx = math.cos(rx), math.sin(rx)
+        Rx[1, 1] = cx; Rx[1, 2] = -sx
+        Rx[2, 1] = sx; Rx[2, 2] = cx
+
+        Ry = np.eye(4, dtype=np.float64)
+        cy, sy = math.cos(ry), math.sin(ry)
+        Ry[0, 0] = cy; Ry[0, 2] = sy
+        Ry[2, 0] = -sy; Ry[2, 2] = cy
+
+        Rz = np.eye(4, dtype=np.float64)
+        cz, sz = math.cos(rz), math.sin(rz)
+        Rz[0, 0] = cz; Rz[0, 1] = -sz
+        Rz[1, 0] = sz; Rz[1, 1] = cz
+
+        T = np.eye(4, dtype=np.float64)
+        T[0, 3] = sc.shift_x
+        T[1, 3] = sc.shift_y
+        T[2, 3] = sc.shift_z
+
+        # _render_normal_scene calls Rx, Ry, Rz, T in that order with
+        # glRotatef/glTranslatef which post-multiply into the matrix
+        # stack.  The math-order equivalent is Rx @ Ry @ Rz @ T.
+        return Rx @ Ry @ Rz @ T
+
+    def _compute_camera_world_pos(self) -> np.ndarray:
+        """Camera position in corrected world space.
+
+        Matches the eye offset arithmetic in _render_normal_scene's
+        gluLookAt call.  cam_target is already in corrected world
+        space (set via REST from the YAML bbox centre), so the
+        offset chain keeps everything in the same frame.
+        """
+        az = math.radians(self.cam_azimuth)
+        el = math.radians(self.cam_elevation)
+        return np.array([
+            self.cam_target[0] + self.cam_distance * math.cos(el) * math.cos(az),
+            self.cam_target[1] + self.cam_distance * math.cos(el) * math.sin(az),
+            self.cam_target[2] + self.cam_distance * math.sin(el),
+        ], dtype=np.float64)
 
     # --- Camera-only view matrix (no scene correction applied) ---
 
@@ -619,6 +728,43 @@ class BaseGLViewport(QOpenGLWidget):
             return self._capture_h
         return max(1, self.height())
 
+    def _framebuffer_size(self) -> Tuple[int, int]:
+        try:
+            dpr = float(self.devicePixelRatioF())
+        except Exception:
+            dpr = 1.0
+        if dpr <= 0.0:
+            dpr = 1.0
+        fb_w = max(1, int(round(self.width() * dpr)))
+        fb_h = max(1, int(round(self.height() * dpr)))
+        return fb_w, fb_h
+
+    def _apply_preview_viewport(self) -> None:
+        # Qt does not reset glViewport between paintGL calls — only
+        # in resizeGL on actual resize events.  The else branch below
+        # is REQUIRED to clear any letterbox rect left by a previous
+        # capture-mode paint.  Do not "simplify" it away.
+        fb_w, fb_h = self._framebuffer_size()
+        cap_w = self._capture_w
+        cap_h = self._capture_h
+        if (cap_w is not None and cap_h is not None
+                and cap_w > 0 and cap_h > 0):
+            ca = float(cap_w) / float(cap_h)
+            wa = float(fb_w) / float(fb_h)
+            if wa > ca:
+                rh = fb_h
+                rw = int(round(fb_h * ca))
+                rx = (fb_w - rw) // 2
+                ry = 0
+            else:
+                rw = fb_w
+                rh = int(round(fb_w / ca))
+                rx = 0
+                ry = (fb_h - rh) // 2
+            glViewport(rx, ry, max(1, rw), max(1, rh))
+        else:
+            glViewport(0, 0, fb_w, fb_h)
+
     # --- Offscreen rendering for the video recorder ---
 
     def render_to_buffer(self, width: int, height: int) -> bytes:
@@ -643,13 +789,15 @@ class BaseGLViewport(QOpenGLWidget):
             owned_ctx = False
 
         try:
+            # Fresh FBO per call — no caching.  FBO state
+            # accumulation between frames caused the rotation-time
+            # wipe ring in recording mode, which the widened
+            # smoothstep + glFinish couldn't fix.  This matches
+            # HEAD's known-working pattern: allocate, render, read
+            # pixels, release (which destroys the FBO).  Slightly
+            # more expensive per frame but fully ring-safe.
             fmt = QOpenGLFramebufferObjectFormat()
-            # IMPORTANT: samples MUST be 0 for an FBO we read with
-            # glReadPixels.  A multisample colour attachment is not
-            # directly readable — the result is undefined and shows
-            # up as occasional "wrong opacity / brightness / density"
-            # frames in the recording.  4K rendering doesn't really
-            # need MSAA anyway; the resolution itself supersamples.
+            # IMPORTANT: samples MUST be 0 for a readable FBO.
             fmt.setSamples(0)
             fmt.setAttachment(QOpenGLFramebufferObject.Attachment.Depth)
             fbo = QOpenGLFramebufferObject(int(width), int(height), fmt)
@@ -662,8 +810,8 @@ class BaseGLViewport(QOpenGLWidget):
             self._capture_w, self._capture_h = int(width), int(height)
             try:
                 glViewport(0, 0, int(width), int(height))
-                # Run the same render path as paintGL but writing into
-                # our FBO instead of the widget's default framebuffer.
+                # Run the same render path as paintGL but writing
+                # into our FBO instead of the widget's framebuffer.
                 self._paint_in_progress = True
                 t0 = time.perf_counter()
                 gpu_q = self._gpu_timer_begin()
@@ -672,10 +820,14 @@ class BaseGLViewport(QOpenGLWidget):
                 finally:
                     self._gpu_timer_end(gpu_q)
 
+                # Force GPU sync before reading pixels (macOS Metal).
+                try:
+                    from OpenGL.GL import glFinish
+                    glFinish()
+                except Exception:
+                    pass
                 # Read the colour attachment.  GL framebuffers are
-                # bottom-up; ffmpeg's ``vflip`` filter flips them on
-                # the way to the encoder, so we don't need to copy
-                # rows here.
+                # bottom-up; ffmpeg's ``vflip`` filter flips them.
                 glPixelStorei(GL_PACK_ALIGNMENT, 1)
                 pixels = glReadPixels(
                     0, 0, int(width), int(height),
@@ -690,10 +842,12 @@ class BaseGLViewport(QOpenGLWidget):
                 self._last_paint_end_t = t_end
                 return raw
             finally:
+                # CRITICAL: all three restorations must happen to
+                # avoid the rotation-time ring bug — don't touch
+                # without reading the git blame on this block.
                 self._capture_w, self._capture_h = saved_w, saved_h
                 self._paint_in_progress = False
                 fbo.release()
-                # Restore viewport to widget size for next paintGL.
                 glViewport(0, 0, max(1, self.width()), max(1, self.height()))
         finally:
             if owned_ctx:
@@ -1191,37 +1345,14 @@ class BaseGLViewport(QOpenGLWidget):
         )
 
         if use_shader:
-            # IMPORTANT: bbox annotations are drawn by the editor
-            # using the *pre-correction* modelview matrix (saved as
-            # self._pre_correction_matrix in _draw_global_overlays).
-            # That's the matrix that puts the annotation at the
-            # screen location the user authored it for.  We project
-            # our 8 corners through the SAME matrix to keep the
-            # silhouette aligned with the rendered bbox.
-            #
-            # Use the SAME math project_points_to_screen uses
-            # elsewhere in the codebase (utils/math.py) so any
-            # convention bugs are shared and easy to find.
-
-            pre_corr = getattr(self, "_pre_correction_matrix", None)
-            mv_arr = (np.asarray(pre_corr, dtype=np.float64)
-                      if pre_corr is not None
-                      else self._compute_camera_view_matrix().T)
-            # mv_arr should be the column-major (i.e. M.T in numpy)
-            # form that the rest of the codebase uses.
-            if mv_arr.ndim == 1:
-                mv_arr = mv_arr.reshape(4, 4)
-            proj_arr = np.asarray(
-                glGetFloatv(GL_PROJECTION_MATRIX), dtype=np.float64
-            )
-            if proj_arr.ndim == 1:
-                proj_arr = proj_arr.reshape(4, 4)
-
-            # Optional expansion: scale the bbox around its center
-            # by `fade_expansion` BEFORE projection.  Lets the user
-            # widen the fade region beyond the strict bbox cone to
-            # catch foreground beams that are visually adjacent to
-            # the bbox but technically outside its silhouette.
+            # TRUE 3D ray-AABB culling against the target bbox.
+            # The whole bbox interior is the AoI — culling only
+            # fires for vertices STRICTLY in front of the bbox
+            # (tEnter > 1 in the shader).  No inner "core" split:
+            # vertices inside the bbox always have tEnter < 1 and
+            # are therefore never culled.  fade_expansion scales
+            # the whole bbox around its centre (< 1 shrinks the
+            # AoI, > 1 expands it).
             exp = max(1e-3, float(self.fade_expansion))
             if exp != 1.0:
                 center = 0.5 * (bb_min + bb_max)
@@ -1232,118 +1363,47 @@ class BaseGLViewport(QOpenGLWidget):
                 bb_min_p = bb_min
                 bb_max_p = bb_max
 
-            # Build the 8 bbox corners as homogeneous world points
-            # (rows of an (8, 4) matrix; w = 1).
-            x0, y0, z0 = bb_min_p
-            x1, y1, z1 = bb_max_p
-            corners_w = np.array([
-                [x0, y0, z0, 1.0],
-                [x1, y0, z0, 1.0],
-                [x0, y1, z0, 1.0],
-                [x1, y1, z0, 1.0],
-                [x0, y0, z1, 1.0],
-                [x1, y0, z1, 1.0],
-                [x0, y1, z1, 1.0],
-                [x1, y1, z1, 1.0],
-            ], dtype=np.float64)
+            camera_w = self._compute_camera_world_pos()
+            corr_mat = self._build_correction_matrix()
+            aoi_valid = True
 
-            # Combined MVP in column-major form (matches
-            # project_points_to_screen):
-            #   mvp_cm = (proj.T @ mv.T).T
-            # Then `pts @ mvp_cm` gives clip-space rows, identical
-            # to what project_points_to_screen does internally.
-            mvp_cm = (proj_arr.T @ mv_arr.T).T
-            corners_c = corners_w @ mvp_cm
-
-            # View-space (just modelview applied, no projection).
-            # mv_arr is column-major (= M_mv.T in numpy terms), so
-            # `corners_w @ mv_arr` evaluates to
-            #   corners_w[i] @ M_mv.T = (M_mv @ corners_w[i]^T)^T
-            # which IS the view-space row.  No extra .T — the OLD
-            # code was right but I was about to add another transpose
-            # in the rewrite that broke near_view_z extraction and
-            # collapsed the shader's front-fade test entirely.
-            corners_v = corners_w @ mv_arr
-            ws = corners_c[:, 3]
-            in_front = ws > 1e-5
-
-            hull_edges = []
-            aoi_valid = False
-            near_view_z = 0.0
-            far_view_z = 0.0
-
-            # Stash all 8 corner projections (or NaN where w<=0) for
-            # the debug overlay — useful to see exactly where each
-            # corner lands even when the hull is degenerate.
-            self._fade_debug_corners_ndc = []
-            for i in range(8):
-                if ws[i] > 1e-5:
-                    nx = corners_c[i, 0] / ws[i]
-                    ny = corners_c[i, 1] / ws[i]
-                    self._fade_debug_corners_ndc.append((float(nx), float(ny)))
-                else:
-                    self._fade_debug_corners_ndc.append((float('nan'), float('nan')))
-
-            if in_front.any():
-                front_idx = np.where(in_front)[0]
-                ndc_pts = corners_c[front_idx, :2] / corners_c[front_idx, 3:4]
-
-                # If the bbox straddles the near plane the visible
-                # silhouette can extend off-screen on every side —
-                # use the full screen rectangle (4 axis-aligned edges).
-                if not in_front.all():
-                    pts_for_hull = np.array([
-                        [-1.0, -1.0], [ 1.0, -1.0],
-                        [ 1.0,  1.0], [-1.0,  1.0],
-                    ])
-                else:
-                    pts_for_hull = ndc_pts
-
-                hull = _convex_hull_2d(pts_for_hull)
-                # Stash for debug overlay (if enabled).
-                self._fade_debug_hull_ndc = list(hull)
-                if len(hull) >= 3:
-                    # Convert each edge of the CCW hull to a line
-                    # equation `a*x + b*y + c >= 0` for "inside".
-                    for i in range(len(hull)):
-                        p1 = hull[i]
-                        p2 = hull[(i + 1) % len(hull)]
-                        dx = p2[0] - p1[0]
-                        dy = p2[1] - p1[1]
-                        # Inward normal for CCW: (-dy, dx)
-                        nx = -dy
-                        ny = dx
-                        c = -(nx * p1[0] + ny * p1[1])
-                        hull_edges.append((nx, ny, c))
-
-                    view_zs = corners_v[in_front, 2]
-                    near_view_z = float(view_zs.max())
-                    far_view_z  = float(view_zs.min())
-                    if near_view_z >= 0.0:
-                        near_view_z = -1e-4
-                    if far_view_z >= near_view_z:
-                        far_view_z = near_view_z - 1e-4
-                    aoi_valid = True
+            if self.fade_debug_overlay:
+                log.debug(
+                    "cull3d az=%.1f el=%.1f cam=(%.2f,%.2f,%.2f) "
+                    "bbox=[(%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f)] "
+                    "discard=%s",
+                    self.cam_azimuth, self.cam_elevation,
+                    camera_w[0], camera_w[1], camera_w[2],
+                    bb_min_p[0], bb_min_p[1], bb_min_p[2],
+                    bb_max_p[0], bb_max_p[1], bb_max_p[2],
+                    bool(self.fade_discard_culled),
+                )
 
             shader.bind()
             shader.set_uniforms(
-                hull_edges=hull_edges,
-                aoi_near_view_z=near_view_z,
-                aoi_far_view_z=far_view_z,
+                camera_world=(float(camera_w[0]),
+                              float(camera_w[1]),
+                              float(camera_w[2])),
+                aoi_min_world=(float(bb_min_p[0]),
+                               float(bb_min_p[1]),
+                               float(bb_min_p[2])),
+                aoi_max_world=(float(bb_max_p[0]),
+                               float(bb_max_p[1]),
+                               float(bb_max_p[2])),
+                correction_matrix=corr_mat,
                 aoi_valid=aoi_valid,
-                fade_band=float(self.fade_band),
                 fade_mul=float(self.fade_alpha_mul),
                 layer_alpha=float(layer.opacity),
                 fade_enable=True,
                 point_size=float(base_size),
+                discard_culled=bool(self.fade_discard_culled),
             )
             # Some drivers (Apple Metal) ignore the fixed-function
             # glPointSize() once a shader program is bound and use
-            # gl_PointSize from the vertex shader instead.  We
-            # enable GL_VERTEX_PROGRAM_POINT_SIZE so writes from
-            # our vertex shader take effect.  Restored after the
-            # draw so subsequent fixed-function paths still use
-            # glPointSize().
+            # gl_PointSize from the vertex shader instead.  Enable
+            # GL_VERTEX_PROGRAM_POINT_SIZE so the shader's write
+            # takes effect.  Disabled after the draw so subsequent
+            # fixed-function paths still use glPointSize().
             try:
                 from OpenGL.GL import GL_VERTEX_PROGRAM_POINT_SIZE
                 glEnable(GL_VERTEX_PROGRAM_POINT_SIZE)
@@ -1396,6 +1456,10 @@ class BaseGLViewport(QOpenGLWidget):
                 pass
             # Disable GL_VERTEX_PROGRAM_POINT_SIZE so the next
             # fixed-function draw uses glPointSize() again.
+            # Critical on Apple Metal — leaving this enabled makes
+            # subsequent non-shader draws ignore glPointSize() and
+            # render points at 1 pixel (or whatever stale gl_PointSize
+            # the previous shader wrote).
             try:
                 from OpenGL.GL import GL_VERTEX_PROGRAM_POINT_SIZE
                 glDisable(GL_VERTEX_PROGRAM_POINT_SIZE)

@@ -16,6 +16,7 @@ rest of the renderer already supports (Windows / Linux / macOS).
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 from OpenGL.GL import (
     GL_COMPILE_STATUS,
@@ -37,7 +38,8 @@ from OpenGL.GL import (
     glShaderSource,
     glUniform1f,
     glUniform1i,
-    glUniform3fv,
+    glUniform3f,
+    glUniformMatrix4fv,
     glUseProgram,
 )
 
@@ -46,27 +48,31 @@ log = logging.getLogger(__name__)
 
 _VERT_SRC = """\
 #version 120
-// Pass view-space position AND clip-space position to the fragment
-// shader.  The box-aligned fade test uses clip-space (post-projection)
-// coordinates to check whether a fragment falls inside the AoI bbox's
-// screen-space silhouette, and view-space Z to check whether it lies
-// in front of the bbox's nearest face.
+// Point fade shader — TRUE 3D culling.
 //
-// Also writes gl_PointSize from a uniform.  When a shader program is
-// bound, some drivers (notably macOS Metal) ignore the fixed-function
-// glPointSize() and fall back to 1.0 unless the vertex shader writes
-// gl_PointSize explicitly — which would otherwise make points appear
-// 1 pixel wide and look like "lower density" when fade is enabled.
+// Vertex shader forwards:
+//   * vWorldPos — corrected-world position of the vertex.  The
+//                 fragment shader uses this + the camera world
+//                 position + the bbox (all in corrected world
+//                 space) to run a proper ray-AABB test for the
+//                 "is this vertex between camera and target"
+//                 culling condition.  No screen-space projection
+//                 approximation — all geometry survives rotation.
+//
+// gl_Vertex is in PRE-correction world space (the raw point cloud
+// data).  uCorrectionMat transforms it into the corrected world
+// space the AoI bbox lives in so the ray-AABB test has a consistent
+// frame of reference.
 uniform float uPointSize;
+uniform mat4  uCorrectionMat;
 
-varying vec3 vViewPos;
-varying vec4 vClipPos;
+varying vec3 vWorldPos;
 varying vec4 vColor;
+
 void main() {
-    vec4 viewPos = gl_ModelViewMatrix * gl_Vertex;
-    vViewPos = viewPos.xyz;
-    gl_Position = gl_ProjectionMatrix * viewPos;
-    vClipPos = gl_Position;
+    gl_Position = gl_ProjectionMatrix * gl_ModelViewMatrix * gl_Vertex;
+    vec4 corrected = uCorrectionMat * gl_Vertex;
+    vWorldPos = corrected.xyz;
     vColor = gl_Color;
     gl_PointSize = uPointSize;
 }
@@ -103,64 +109,98 @@ void main() {
 # geometry is rendered anywhere.
 _FRAG_SRC = """\
 #version 120
-// Convex hull of the 8 projected bbox corners (in NDC).  Each edge
-// is a line equation `a*x + b*y + c = 0` with the CCW convention
-// that "inside the polygon" means a*x + b*y + c >= 0.  Unused
-// slots are set to (0, 0, 1) → always inside, no contribution.
-#define HULL_MAX 8
-uniform vec3  uHullEdges[HULL_MAX];
-uniform int   uHullEdgeCount;
-uniform float uAoiNearViewZ;  // least-negative view-space Z (front face)
-uniform float uAoiFarViewZ;   // most-negative view-space Z  (back face)
-uniform float uFadeBand;      // smoothstep softness (NDC units)
-uniform float uFadeMul;       // alpha multiplier for front occluders
-uniform float uLayerAlpha;    // base layer opacity
-uniform int   uFadeEnable;    // 0 = pass-through, 1 = apply fade
-uniform int   uAoiValid;      // 0 = invalid (camera inside bbox etc.)
+// TRUE 3D pyramid culling via ray-AABB in corrected-world space.
+//
+// For each fragment, cast a ray from the camera through the vertex
+// and test intersection with the target bbox.  The vertex is at
+// parameter t=1 on its own ray.
+//
+// Region table (v1, the simple ray-AABB semantic):
+//   tEnter > 1         → STRICTLY in front of bbox (occluder) → CULL
+//   tEnter <= 1 <= tExit → INSIDE the bbox (AoI itself)       → KEEP
+//   tExit  < 1         → STRICTLY past bbox (behind target)   → BACK
+//   ray misses bbox    → NOT in the cone                       → KEEP
+//
+// CRUCIAL: the WHOLE bbox interior is preserved automatically
+// because inside-bbox vertices have tEnter < 1, so the front-cone
+// check `tEnter > 1` never fires for them.  No separate "core"
+// bbox needed — the outer bbox IS the AoI.
+//
+// Float-precision safety band around tEnter=1 (asymmetric smoothstep)
+// keeps bbox-surface vertices stable across frames even under
+// worst-case rounding drift — see the eps_low/eps_high values.
+uniform vec3  uCameraW;
+uniform vec3  uAoiMinW;
+uniform vec3  uAoiMaxW;
+uniform float uFadeMul;
+uniform float uLayerAlpha;
+uniform int   uFadeEnable;
+uniform int   uAoiValid;
+uniform int   uDiscardCulled;
 
-varying vec3 vViewPos;
-varying vec4 vClipPos;
+varying vec3 vWorldPos;
 varying vec4 vColor;
 
 void main() {
     float a = vColor.a * uLayerAlpha;
 
-    if (uFadeEnable == 1 && uAoiValid == 1 && vClipPos.w > 1e-5) {
-        vec2 ndc = vClipPos.xy / vClipPos.w;
+    if (uFadeEnable == 1 && uAoiValid == 1) {
+        vec3 dir = vWorldPos - uCameraW;
+        // Guard against zero components to avoid inf/NaN in division.
+        vec3 safeDir;
+        safeDir.x = (abs(dir.x) < 1e-20) ? 1e-20 : dir.x;
+        safeDir.y = (abs(dir.y) < 1e-20) ? 1e-20 : dir.y;
+        safeDir.z = (abs(dir.z) < 1e-20) ? 1e-20 : dir.z;
+        vec3 invDir = 1.0 / safeDir;
 
-        // Inside-hull test: for each edge compute the signed distance
-        // to the half-plane.  The minimum across all edges is the
-        // signed distance to the boundary; positive = inside.
-        // GLSL 1.20 requires constant loop bounds, so we walk the
-        // full HULL_MAX and skip unused slots (which are set to a
-        // tautological "always inside" line equation).
-        float minDist = 1.0;
-        for (int i = 0; i < HULL_MAX; i++) {
-            if (i >= uHullEdgeCount) break;
-            float d = uHullEdges[i].x * ndc.x
-                    + uHullEdges[i].y * ndc.y
-                    + uHullEdges[i].z;
-            minDist = min(minDist, d);
+        vec3 t1 = (uAoiMinW - uCameraW) * invDir;
+        vec3 t2 = (uAoiMaxW - uCameraW) * invDir;
+        vec3 tMin3 = min(t1, t2);
+        vec3 tMax3 = max(t1, t2);
+        float tEnter = max(max(tMin3.x, tMin3.y), tMin3.z);
+        float tExit  = min(min(tMax3.x, tMax3.y), tMax3.z);
+
+        // Ray actually intersects the forward half-line.
+        float hit = step(tEnter, tExit) * step(0.0, tExit);
+
+        // FLOAT-PRECISION SAFETY BAND — do NOT narrow without testing.
+        //
+        // Hard `step(1 + eps, tEnter)` causes bbox-surface vertices
+        // (tEnter ~ 1.0 with float drift) to flicker in and out of
+        // the culled set as the camera rotates.  In discard mode
+        // this flicker is a visible "wipe ring" formed by bbox
+        // edges sweeping across the scene — exactly the bug we
+        // keep hitting on the recording path where MSAA on the
+        // widget hides the flicker but the FBO/video captures it.
+        //
+        // The smoothstep band must be:
+        //   - wide enough to absorb float drift (>= 1e-2)
+        //   - start well past 1.0 so bbox near-face vertices
+        //     (tEnter ~ 1.0) are never culled
+        //   - end before realistic occluder tEnter values
+        //
+        // eps_low  = 5e-3   (10x float drift, start of transition)
+        // eps_high = 5e-2   (wide enough for stable video frames)
+        float eps_low  = 5e-3;
+        float eps_high = 5e-2;
+
+        // Cull vertices STRICTLY in front of the bbox's near face.
+        // Vertices inside the bbox (tEnter < 1) or on the near face
+        // (tEnter ≈ 1) have inFrontCone = 0 → fully preserved as AoI.
+        float inFrontCone = hit * smoothstep(1.0 + eps_low,
+                                             1.0 + eps_high, tEnter);
+        // Back fade: vertices STRICTLY past the bbox far face.
+        float behindBbox  = hit * (1.0 - smoothstep(1.0 - eps_high,
+                                                    1.0 - eps_low, tExit));
+
+        if (uDiscardCulled == 1 && inFrontCone > 0.5) {
+            discard;
         }
-        // Smoothstep across the boundary so the edge isn't a hard
-        // step. uFadeBand is the half-band in NDC units.
-        float silhouette = smoothstep(-uFadeBand, uFadeBand, minDist);
 
-        // FRONT: vertex closer to camera than bbox front face.
-        float front = step(uAoiNearViewZ, vViewPos.z);
-        // BACK: vertex deeper than bbox back face.
-        float back  = step(vViewPos.z, uAoiFarViewZ);
-
-        // Mid-strength multiplier for the back region: midway
-        // between "no fade" (1.0) and "full fade" (uFadeMul).
         float backMul = mix(1.0, uFadeMul, 0.5);
-
-        float frontFactor = silhouette * front;
-        float backFactor  = silhouette * back;
-
         float fadedAlpha = a;
-        fadedAlpha = mix(fadedAlpha, fadedAlpha * uFadeMul, frontFactor);
-        fadedAlpha = mix(fadedAlpha, fadedAlpha * backMul,  backFactor);
+        fadedAlpha = mix(fadedAlpha, fadedAlpha * uFadeMul, inFrontCone);
+        fadedAlpha = mix(fadedAlpha, fadedAlpha * backMul,  behindBbox);
         a = fadedAlpha;
     }
 
@@ -193,7 +233,7 @@ class PointFadeShader:
         try:
             vs = self._compile(GL_VERTEX_SHADER, _VERT_SRC)
             fs = self._compile(GL_FRAGMENT_SHADER, _FRAG_SRC)
-            prog = glCreateProgram()
+            prog = cast(int, glCreateProgram())
             glAttachShader(prog, vs)
             glAttachShader(prog, fs)
             glLinkProgram(prog)
@@ -204,17 +244,13 @@ class PointFadeShader:
             glDeleteShader(vs)
             glDeleteShader(fs)
             self._program = prog
-            for name in ("uHullEdges", "uHullEdgeCount",
-                         "uAoiNearViewZ", "uAoiFarViewZ",
-                         "uFadeBand", "uFadeMul", "uLayerAlpha",
-                         "uFadeEnable", "uAoiValid", "uPointSize"):
+            for name in ("uCameraW",
+                         "uAoiMinW", "uAoiMaxW",
+                         "uCorrectionMat",
+                         "uFadeMul", "uLayerAlpha",
+                         "uFadeEnable", "uAoiValid", "uPointSize",
+                         "uDiscardCulled"):
                 self._loc[name] = glGetUniformLocation(prog, name)
-            # Each array element gets its own location too — query
-            # the first slot's location and assume contiguous storage
-            # (which the GLSL spec guarantees for plain arrays).
-            base = glGetUniformLocation(prog, "uHullEdges[0]")
-            if base != -1:
-                self._loc["uHullEdges"] = base
             log.info("PointFadeShader compiled (program=%d)", prog)
             return True
         except Exception as exc:
@@ -224,7 +260,7 @@ class PointFadeShader:
             return False
 
     def _compile(self, kind: int, src: str) -> int:
-        sh = glCreateShader(kind)
+        sh = cast(int, glCreateShader(kind))
         glShaderSource(sh, src)
         glCompileShader(sh)
         if not glGetShaderiv(sh, GL_COMPILE_STATUS):
@@ -253,40 +289,49 @@ class PointFadeShader:
     def set_uniforms(
         self,
         *,
-        hull_edges,            # iterable of (a, b, c) line equations
-        aoi_near_view_z: float,
-        aoi_far_view_z: float,
+        camera_world,          # (3,) camera position in corrected world space
+        aoi_min_world,         # (3,) target bbox min in corrected world space
+        aoi_max_world,         # (3,) target bbox max in corrected world space
+        correction_matrix,     # 4x4 row-major numpy; identity if no correction
         aoi_valid: bool,
-        fade_band: float,
         fade_mul: float,
         layer_alpha: float,
         fade_enable: bool,
         point_size: float,
+        discard_culled: bool = False,
     ) -> None:
         if not self.available:
             return
-        # Pad the hull edges out to HULL_MAX with a tautological
-        # "always inside" line equation (a=0, b=0, c=1 means any
-        # (x,y) yields 1 ≥ 0).  This lets the shader run a fixed
-        # loop count which GLSL 1.20 requires.
-        edges = list(hull_edges)[: self.HULL_MAX]
-        count = len(edges)
-        while len(edges) < self.HULL_MAX:
-            edges.append((0.0, 0.0, 1.0))
-        flat = []
-        for a, b, c in edges:
-            flat.extend((float(a), float(b), float(c)))
-        loc = self._loc.get("uHullEdges", -1)
-        if loc != -1:
-            glUniform3fv(loc, self.HULL_MAX, flat)
-        glUniform1i(self._loc["uHullEdgeCount"], int(count))
-        glUniform1f(self._loc["uAoiNearViewZ"], float(aoi_near_view_z))
-        glUniform1f(self._loc["uAoiFarViewZ"], float(aoi_far_view_z))
-        glUniform1f(self._loc["uFadeBand"], float(fade_band))
+        glUniform3f(self._loc["uCameraW"],
+                    float(camera_world[0]),
+                    float(camera_world[1]),
+                    float(camera_world[2]))
+        glUniform3f(self._loc["uAoiMinW"],
+                    float(aoi_min_world[0]),
+                    float(aoi_min_world[1]),
+                    float(aoi_min_world[2]))
+        glUniform3f(self._loc["uAoiMaxW"],
+                    float(aoi_max_world[0]),
+                    float(aoi_max_world[1]),
+                    float(aoi_max_world[2]))
+        # Correction matrix: upload with transpose=GL_TRUE so the
+        # row-major numpy matrix is converted to column-major on
+        # the GPU automatically.
+        loc_corr = self._loc.get("uCorrectionMat", -1)
+        if loc_corr is not None and loc_corr != -1:
+            import numpy as _np
+            from OpenGL.GL import GL_TRUE
+            cm = _np.ascontiguousarray(correction_matrix, dtype=_np.float32)
+            if cm.shape != (4, 4):
+                cm = cm.reshape(4, 4)
+            glUniformMatrix4fv(loc_corr, 1, GL_TRUE, cm)
         glUniform1f(self._loc["uFadeMul"], float(fade_mul))
         glUniform1f(self._loc["uLayerAlpha"], float(layer_alpha))
         glUniform1i(self._loc["uFadeEnable"], 1 if fade_enable else 0)
         glUniform1i(self._loc["uAoiValid"], 1 if aoi_valid else 0)
+        loc_disc = self._loc.get("uDiscardCulled", -1)
+        if loc_disc != -1:
+            glUniform1i(loc_disc, 1 if discard_culled else 0)
         loc_size = self._loc.get("uPointSize", -1)
         if loc_size != -1:
             glUniform1f(loc_size, float(point_size))

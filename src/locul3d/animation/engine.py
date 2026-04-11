@@ -314,6 +314,11 @@ class AnimationEngine(QObject):
         if rec.is_active:  # not paused
             self._viewport._interacting = False
             self._viewport._force_full_res = True
+            # Set capture dims persistently so the widget preview's
+            # paintGL path uses the same aspect ratio for letterboxed
+            # rendering.  Widget and video then show the same framing.
+            self._viewport._capture_w = cfg.width
+            self._viewport._capture_h = cfg.height
             try:
                 rgb = self._viewport.render_to_buffer(cfg.width, cfg.height)
             except Exception as exc:
@@ -331,11 +336,10 @@ class AnimationEngine(QObject):
             self.frame_ready.emit(self._frame_number)
             self._frame_number += 1
 
-            # Refresh the editor widget so the operator sees the
-            # animation in real time.  Input is locked but the picture
-            # must keep moving — otherwise the editor looks frozen.
-            # This is a second, cheap render at widget resolution
-            # (the offscreen capture above is the authoritative one).
+            # Schedule a widget repaint so the preview keeps
+            # showing the animation.  This re-renders the scene
+            # at widget resolution (the offscreen capture above
+            # is the authoritative render for the video file).
             try:
                 self._viewport.update()
             except Exception:
@@ -419,6 +423,14 @@ class AnimationEngine(QObject):
         # animation isn't accidentally captured.
         self._render_mode = "realtime"
         self._frame_number = 0
+
+        # Reset the persistent capture dims so paintGL returns to
+        # widget-native aspect ratio (no more letterbox preview).
+        try:
+            self._viewport._capture_w = None
+            self._viewport._capture_h = None
+        except Exception:
+            pass
 
         # Final cleanup paint so the unmodified scene is shown.
         try:

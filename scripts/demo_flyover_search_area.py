@@ -102,6 +102,25 @@ def main():
                     help="Smoothstep half-band on the bbox silhouette "
                          "edge, in NDC units (NDC range -1..+1). "
                          "Default 0.02 ≈ 1%% of the screen.")
+    ap.add_argument("--discard", action="store_true",
+                    help="Instead of fading occluders, fully discard "
+                         "them (remove from the framebuffer). Gives "
+                         "a hard cut through the scene; requires "
+                         "--fade to be set as well.")
+    ap.add_argument("--fade-expansion", type=float, default=1.0,
+                    metavar="F",
+                    help="Scale the search_region bbox by F around "
+                         "its centre BEFORE culling (1.0=as-is, "
+                         "0.3=shrink to 30%%, 2.0=double size). "
+                         "Use values < 1.0 to focus the culling on "
+                         "the figurine and cull walls inside the "
+                         "search region.")
+
+    ap.add_argument("--debug-overlay", action="store_true",
+                    help="Enable per-frame debug logging of the "
+                         "camera world position, bbox min/max and "
+                         "discard mode flag.  Useful when culling "
+                         "looks wrong at specific camera angles.")
     ap.add_argument("--max-fps", type=float, default=125.0,
                     help="Realtime FPS CEILING (default 125 — matches "
                          "the engine tick rate). The adaptive controller "
@@ -257,19 +276,46 @@ def main():
     # inside the resulting screen-space rectangle AND lies in front
     # of the bbox's nearest face gets its alpha multiplied by
     # `alpha_mul`. The AoI itself stays full-opacity.
-    if args.fade:
-        r = requests.put(f"{API}/viewport/fade", json={
-            "enable": True,
-            "alpha_mul": args.fade_mul,
-            "band": args.fade_band,
-            "aoi_min": bb_min,
-            "aoi_max": bb_max,
-        }, timeout=5)
+    # --discard implies --fade because discard is a MODE of the fade
+    # shader (not a separate feature).  Without fade_enable=True, the
+    # shader's culling branch is entirely skipped and discard has no
+    # effect.  Auto-enable fade so users don't have to remember both
+    # flags.  Always send explicit fade state so no stale flags from
+    # a previous session can leak through.
+    fade_active = bool(args.fade or args.discard)
+    r = requests.put(f"{API}/viewport/fade", json={
+        "enable": fade_active,
+        "alpha_mul": args.fade_mul,
+        "band": args.fade_band,
+        "expansion": args.fade_expansion,
+        "aoi_min": bb_min,
+        "aoi_max": bb_max,
+        "discard_culled": bool(args.discard),
+        "debug_overlay": bool(args.debug_overlay),
+    }, timeout=5)
+    if fade_active:
         if r.status_code == 200:
             info = r.json()
             if info.get("available"):
-                print(f"Point fade ON: alpha_mul={args.fade_mul}, "
-                      f"band={args.fade_band}")
+                mode = "DISCARD" if args.discard else "FADE"
+                note = ""
+                if args.discard and not args.fade:
+                    note = " (auto-enabled fade for discard)"
+                print(f"Point cull ON [{mode}]{note}: "
+                      f"alpha_mul={args.fade_mul}, "
+                      f"expansion={args.fade_expansion}")
+                if args.fade_expansion != 1.0:
+                    exp = args.fade_expansion
+                    half = [s * exp * 0.5 for s in size]
+                    center_now = list(center)
+                    shrunk_min = [center_now[i] - half[i] for i in range(3)]
+                    shrunk_max = [center_now[i] + half[i] for i in range(3)]
+                    print(f"  Effective focus bbox: "
+                          f"min={[round(v, 2) for v in shrunk_min]} "
+                          f"max={[round(v, 2) for v in shrunk_max]}")
+                if args.debug_overlay:
+                    print("  Debug overlay ON — check editor stderr for "
+                          "per-frame cull3d log lines")
             else:
                 print("WARN: shader unavailable on this driver — fade off")
         else:

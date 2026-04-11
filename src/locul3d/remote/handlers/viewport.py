@@ -96,6 +96,7 @@ def _fade_state(vp) -> dict:
         "aoi_min": bb_min.tolist(),
         "aoi_max": bb_max.tolist(),
         "debug_overlay": bool(getattr(vp, "fade_debug_overlay", False)),
+        "discard_culled": bool(getattr(vp, "fade_discard_culled", False)),
         "last_hull_ndc": [[float(x), float(y)] for (x, y) in hull],
         "last_corners_ndc": [
             [None if (isinstance(x, float) and x != x) else float(x),
@@ -135,6 +136,9 @@ async def _set_fade(request: web.Request) -> web.Response:
             vp.fade_expansion = float(data["expansion"])
         if "debug_overlay" in data:
             vp.fade_debug_overlay = bool(data["debug_overlay"])
+        if "discard_culled" in data:
+            vp.fade_discard_culled = bool(data["discard_culled"])
+
 
         # Two ways to specify the AoI box:
         #   1) explicit min + max  (preferred)
