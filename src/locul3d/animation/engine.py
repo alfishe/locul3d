@@ -313,7 +313,12 @@ class AnimationEngine(QObject):
 
         if rec.is_active:  # not paused
             self._viewport._interacting = False
-            self._viewport._force_full_res = True
+            # Do NOT force ``_force_full_res = True`` here — the
+            # viewer's normal stride path is what the user sees on
+            # screen, and the recording must match that.  Forcing
+            # stride=1 for 100M+ points per frame causes the fade
+            # shader's alpha-blending to accumulate into saturated
+            # chromatic noise that has no correspondence to the UI.
             # Set capture dims persistently so the widget preview's
             # paintGL path uses the same aspect ratio for letterboxed
             # rendering.  Widget and video then show the same framing.

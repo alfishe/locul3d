@@ -837,6 +837,12 @@ class BaseGLViewport(QOpenGLWidget):
             ptr = qimg.constBits()
             raw = ptr.tobytes() if hasattr(ptr, 'tobytes') else bytes(ptr)
 
+            # Format_RGB888 on this platform IS byte-order R,G,B.
+            # Verified by pure-red bg test: screenshot [255,0,0]
+            # matches recording [253,0,0] (h264 compression only).
+            # Do NOT use "BGRA" decoder here — it swaps channels
+            # on a platform that doesn't need swapping, producing
+            # blue where orange should be.
             img = Image.frombuffer(
                 "RGB", (iw, ih), raw, "raw", "RGB", bpl, 1,
             )
