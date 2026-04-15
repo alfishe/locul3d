@@ -8,12 +8,12 @@ Cross-platform encoder priority order:
 
     H.264:
       darwin → h264_videotoolbox
-      win32  → h264_nvenc, h264_qsv, h264_amf
+      win32  → h264_nvenc, h264_qsv
       linux  → h264_nvenc, h264_vaapi, h264_qsv
 
     HEVC (H.265):
       darwin → hevc_videotoolbox
-      win32  → hevc_nvenc, hevc_qsv, hevc_amf
+      win32  → hevc_nvenc, hevc_qsv
       linux  → hevc_nvenc, hevc_vaapi, hevc_qsv
 
     Software fallback:
@@ -43,12 +43,12 @@ class EncoderUnavailable(RuntimeError):
 _HW_BY_CODEC_PLATFORM: dict = {
     "h264": {
         "darwin": ["h264_videotoolbox"],
-        "win32":  ["h264_nvenc", "h264_qsv", "h264_amf"],
+        "win32":  ["h264_nvenc", "h264_qsv"],
         "linux":  ["h264_nvenc", "h264_vaapi", "h264_qsv"],
     },
     "hevc": {
         "darwin": ["hevc_videotoolbox"],
-        "win32":  ["hevc_nvenc", "hevc_qsv", "hevc_amf"],
+        "win32":  ["hevc_nvenc", "hevc_qsv"],
         "linux":  ["hevc_nvenc", "hevc_vaapi", "hevc_qsv"],
     },
 }

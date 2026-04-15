@@ -862,18 +862,17 @@ class CommandDispatcher:
         return self._recorder
 
     def _set_input_locked(self, locked: bool) -> None:
-        """Lock/unlock the entire window for the recording lifecycle.
+        """Lock/unlock input for the recording lifecycle.
 
-        Disables the GL viewport's input handlers AND the parent
-        window so toolbars/panels can't be clicked either. Called
-        on the Qt thread.
+        Locks the GL viewport's own input handlers so mouse/keyboard
+        events are ignored.  We intentionally do NOT call
+        ``window.setEnabled(False)`` — on Windows that disables the
+        entire widget tree including the QOpenGLWidget, which
+        prevents ``makeCurrent()`` from activating the GL context
+        and causes ``render_to_buffer()`` to produce blank frames.
         """
         try:
             self._viewport.set_input_locked(locked)
-        except Exception:
-            pass
-        try:
-            self._window.setEnabled(not locked)
         except Exception:
             pass
 

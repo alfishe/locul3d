@@ -359,10 +359,11 @@ class VideoRecorder:
             "-i", "-",
         ]
 
-        # Vertical flip: GL framebuffer is bottom-up; ffmpeg/mp4 wants
-        # top-down, so we add a vflip filter.  Cheap on the CPU at
-        # 4K because libavfilter is SIMD-vectorised.
-        cmd += ["-vf", "vflip"]
+        # NOTE: render_to_buffer returns top-down rgb24 on all
+        # platforms.  win32/linux grab QImage (already top-down)
+        # via the widget path; darwin's FBO path uses glReadPixels
+        # (bottom-up) and flips to top-down in Python.  ffmpeg
+        # therefore ingests raw rgb24 WITHOUT a vflip filter.
 
         # Encoder selection + sensible defaults per encoder family.
         cmd += ["-c:v", cfg.encoder]
@@ -378,10 +379,6 @@ class VideoRecorder:
                     "-maxrate", f"{cfg.bitrate_kbps * 2}k"]
         elif cfg.encoder.endswith("_qsv"):
             cmd += ["-global_quality", "22",
-                    "-b:v", f"{cfg.bitrate_kbps}k"]
-        elif cfg.encoder.endswith("_amf"):
-            cmd += ["-quality", "quality",
-                    "-rc", "vbr_peak",
                     "-b:v", f"{cfg.bitrate_kbps}k"]
         elif cfg.encoder.endswith("_vaapi"):
             cmd += ["-b:v", f"{cfg.bitrate_kbps}k"]

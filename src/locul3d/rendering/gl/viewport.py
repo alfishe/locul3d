@@ -788,40 +788,97 @@ class BaseGLViewport(QOpenGLWidget):
         return img.tobytes()
 
     def render_to_buffer(self, width: int, height: int) -> bytes:
-        """Render the scene to an offscreen FBO and return the raw RGB
-        pixel buffer (rgb24, bottom-up) at *width × height*.
+        """Render the scene and return raw RGB24 bytes (bottom-up).
 
-        Called on the Qt main thread by VideoRecorder.  The FBO is
-        rendered at ``max(2, devicePixelRatio)`` times the target
-        dimensions and box-filter downsampled before readback so
-        recorded frames match the widget's MSAA-smoothed output.
+        Platform dispatch:
+          * **darwin** — custom FBO with 2× super-sampling.  Works
+            reliably on macOS because CGL / Metal drivers tolerate
+            binding a user FBO outside ``paintGL`` and the VBO state
+            is carried over correctly.
+          * **win32 / linux** — grab the widget's own framebuffer.
+            On Windows, QOpenGLWidget's VBO state does not carry
+            over to user-created FBOs, so the only reliable path is
+            the one the user actually sees on screen.  Linux GL
+            drivers vary in strictness; using the same path as
+            Windows guarantees consistent behaviour.
         """
-        # Super-sample rationale (regression-prone; keep):
-        #
-        # The Qt widget's MSAA 4x framebuffer resolves point-cloud
-        # fragments with ~4x coverage averaging per pixel, which
-        # smooths low-alpha fade ghosts into the background.  An FBO
-        # with ``samples=0`` has no such averaging and renders those
-        # fragments as visible individual dots — the "accumulated
-        # ceiling/roof cleared fragments" the user reported on
-        # recorded flyovers at azimuths 90°-270° in fade mode.
-        # Rendering the FBO at 2x the target dimensions and box-
-        # filter downsampling gives each output pixel the same
-        # coverage averaging the widget produces.  Do NOT simplify
-        # back to a 1x FBO — you will reintroduce the ghosting bug.
-        # Do NOT switch the downsample to glBlitFramebuffer either:
-        # ``GL_LINEAR`` on downsample is driver-dependent and on
-        # macOS Metal falls back to near-nearest output.  The PIL
-        # BOX filter used in ``_downsample_rgb24`` is exactly
-        # equivalent to MSAA's box-filter resolve (uniform weight
-        # sf×sf block mean for integer super-sample ratios) and
-        # runs ~12 ms per frame at 4K — fast enough to keep the
-        # 60 fps recorder in lock-step with the animation engine.
-        from PySide6.QtOpenGL import QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat
-        from PySide6.QtGui import QOpenGLContext
-
         if not HAS_OPENGL or not getattr(self, "_gl_ok", True):
             return b""
+
+        import sys
+        if sys.platform == "darwin":
+            return self._render_to_buffer_fbo(width, height)
+        # win32 and linux both go through the widget-grab path.
+        return self._render_to_buffer_repaint(width, height)
+
+    # ── Windows / Linux path: grabFramebuffer → raw RGB24 ─────────
+
+    def _render_to_buffer_repaint(self, width: int, height: int) -> bytes:
+        """Windows/Linux path: ``grabFramebuffer()`` → top-down RGB bytes.
+
+        Matches the dispatcher ``take_screenshot`` path which is known
+        to work: a single ``grabFramebuffer()`` call does the whole
+        paint + readback atomically inside Qt, returning a QImage
+        (top-down) identical to what the user sees.
+        """
+        from PIL import Image
+
+        t0 = time.perf_counter()
+
+        # Temporarily clear _capture_w/h so the widget paints at its
+        # native aspect with no letterbox viewport.
+        saved_w, saved_h = self._capture_w, self._capture_h
+        self._capture_w, self._capture_h = None, None
+        try:
+            qimg = self.grabFramebuffer()
+            qimg = qimg.convertToFormat(qimg.Format.Format_RGB888)
+            iw, ih = qimg.width(), qimg.height()
+            bpl = qimg.bytesPerLine()
+            ptr = qimg.constBits()
+            raw = ptr.tobytes() if hasattr(ptr, 'tobytes') else bytes(ptr)
+
+            img = Image.frombuffer(
+                "RGB", (iw, ih), raw, "raw", "RGB", bpl, 1,
+            )
+
+            tw, th = int(width), int(height)
+            if iw == tw and ih == th:
+                out_bytes = img.tobytes()
+            else:
+                bg = self.bg_color if hasattr(self, "bg_color") else (0, 0, 0, 1)
+                bg_rgb = tuple(int(round(c * 255)) for c in bg[:3])
+                sa = iw / max(ih, 1)
+                ta = tw / max(th, 1)
+                if sa > ta:
+                    fw = tw
+                    fh = max(1, int(round(tw / sa)))
+                else:
+                    fh = th
+                    fw = max(1, int(round(th * sa)))
+                scaled = img.resize((fw, fh), Image.Resampling.BOX)
+                canvas = Image.new("RGB", (tw, th), bg_rgb)
+                canvas.paste(scaled, ((tw - fw) // 2, (th - fh) // 2))
+                out_bytes = canvas.tobytes()
+        finally:
+            self._capture_w, self._capture_h = saved_w, saved_h
+
+        t_end = time.perf_counter()
+        self._last_paint_ms = (t_end - t0) * 1000.0
+        self._last_paint_end_t = t_end
+        return out_bytes
+
+    # ── macOS path: render to a custom FBO ───────────────────────
+
+    def _render_to_buffer_fbo(self, width: int, height: int) -> bytes:
+        """macOS path: render to a fresh FBO with 2× super-sampling.
+
+        The Qt widget's MSAA 4× framebuffer smooths low-alpha fade
+        ghosts.  An ``samples=0`` FBO has no such averaging.
+        Rendering at 2× and BOX-filter downsampling restores the
+        same coverage averaging.  Do NOT simplify to a 1× FBO.
+        """
+        from PySide6.QtOpenGL import QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat
+        from PySide6.QtGui import QOpenGLContext
 
         ctx = QOpenGLContext.currentContext()
         if ctx is None:
@@ -842,15 +899,7 @@ class BaseGLViewport(QOpenGLWidget):
             hires_h = max(1, int(round(height * ss_factor)))
             need_downsample = (hires_w != int(width) or hires_h != int(height))
 
-            # Fresh FBO per call — no caching.  FBO state
-            # accumulation between frames caused the rotation-time
-            # wipe ring in recording mode, which the widened
-            # smoothstep + glFinish couldn't fix.  This matches
-            # HEAD's known-working pattern: allocate, render, read
-            # pixels, release (which destroys the FBO).  Slightly
-            # more expensive per frame but fully ring-safe.
             fmt = QOpenGLFramebufferObjectFormat()
-            # IMPORTANT: samples MUST be 0 for a readable FBO.
             fmt.setSamples(0)
             fmt.setAttachment(QOpenGLFramebufferObject.Attachment.Depth)
             fbo = QOpenGLFramebufferObject(hires_w, hires_h, fmt)
@@ -860,10 +909,6 @@ class BaseGLViewport(QOpenGLWidget):
 
             fbo.bind()
             saved_w, saved_h = self._capture_w, self._capture_h
-            # Projection aspect ratio must match the TARGET resolution
-            # (same as hires since hires is a proportional scale).
-            # Keeping _capture_w/h at target size also preserves the
-            # widget letterbox math in _apply_preview_viewport.
             self._capture_w, self._capture_h = int(width), int(height)
             self._in_capture_render = True
             try:
@@ -881,8 +926,6 @@ class BaseGLViewport(QOpenGLWidget):
                     glFinish()
                 except Exception:
                     pass
-                # Read the colour attachment at hires.  GL framebuffers
-                # are bottom-up; ffmpeg's ``vflip`` filter flips them.
                 glPixelStorei(GL_PACK_ALIGNMENT, 1)
                 pixels = glReadPixels(
                     0, 0, hires_w, hires_h,
@@ -901,14 +944,20 @@ class BaseGLViewport(QOpenGLWidget):
                 else:
                     raw = hires_raw
 
+                # glReadPixels returns bottom-up; flip to top-down
+                # so the output matches the Windows grab path and
+                # ffmpeg can ingest rgb24 without -vf vflip.
+                from PIL import Image
+                flipped = Image.frombytes(
+                    "RGB", (int(width), int(height)), raw,
+                ).transpose(Image.FLIP_TOP_BOTTOM)
+                raw = flipped.tobytes()
+
                 t_end = time.perf_counter()
                 self._last_paint_ms = (t_end - t0) * 1000.0
                 self._last_paint_end_t = t_end
                 return raw
             finally:
-                # CRITICAL: all three restorations must happen to
-                # avoid the rotation-time ring bug — don't touch
-                # without reading the git blame on this block.
                 self._capture_w, self._capture_h = saved_w, saved_h
                 self._paint_in_progress = False
                 self._in_capture_render = False

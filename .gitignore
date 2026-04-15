@@ -22,5 +22,6 @@ Thumbs.db
 .env
 .venv
 venv/
-.claude/settings.local.json
+.claude/
 video
+poc/out/
