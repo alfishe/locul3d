@@ -331,6 +331,7 @@ class AnimationEngine(QObject):
                 rec.abort(f"render failed: {exc}")
                 self._stop_capture_session()
                 return
+
             try:
                 rec.feed_frame(rgb)
             except Exception as exc:
@@ -385,10 +386,6 @@ class AnimationEngine(QObject):
             self._viewport._force_full_res = False
             self._viewport._preview_mode = False
         except Exception:
-            pass
-        try:
-            self._viewport.set_capture_in_progress(False)
-        except AttributeError:
             pass
 
         if self._recorder is not None:
