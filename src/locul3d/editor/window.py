@@ -28,7 +28,7 @@ from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
 from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, PlaneItem
-from ..utils.metadata import load_all_metadata, METADATA_HANDLERS
+from ..utils.metadata import load_all_metadata, METADATA_HANDLERS, infer_corridor_axis
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -733,7 +733,6 @@ class EditorWindow(QMainWindow):
                 self.layer_panel.rebuild()
             except Exception:
                 pass
-        # Auto-detect metadata files
         self._detect_metadata(folder_path)
 
         self.gl_viewport.fit_to_scene()
@@ -770,12 +769,14 @@ class EditorWindow(QMainWindow):
         new_groups = []
 
         kind_groups = load_all_metadata(folder_path)
+        corridor_axis = infer_corridor_axis(kind_groups)
+
         for kind, items in kind_groups.items():
             handler = METADATA_HANDLERS.get(kind)
             if handler is None:
                 continue
             try:
-                bboxes, gaps, planes = handler.parse(items)
+                bboxes, gaps, planes = handler.parse(items, corridor_axis=corridor_axis)
             except Exception:
                 continue
             if not bboxes and not gaps:
