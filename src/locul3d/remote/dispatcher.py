@@ -904,6 +904,10 @@ class CommandDispatcher:
             self._animation_engine._render_mode = "capture"
             self._animation_engine.attach_recorder(rec)
             self._animation_engine._frame_number = 0
+            try:
+                self._viewport.set_capture_in_progress(True)
+            except AttributeError:
+                pass
 
             # Per-recording viewport overrides.  Save the originals
             # so we can restore them on stop().  None ⇒ inherit, no
@@ -1265,6 +1269,10 @@ class CommandDispatcher:
             vp._interacting = False
             if self._animation_engine:
                 self._animation_engine._render_mode = "capture"
+            try:
+                vp.set_capture_in_progress(True)
+            except AttributeError:
+                pass
         else:
             # Restore realtime mode
             from PySide6.QtWidgets import QWIDGETSIZE_MAX
@@ -1272,6 +1280,10 @@ class CommandDispatcher:
             vp.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX)
             if self._animation_engine:
                 self._animation_engine._render_mode = "realtime"
+            try:
+                vp.set_capture_in_progress(False)
+            except AttributeError:
+                pass
 
         self.fire_event("event.render_mode_changed", {
             "mode": mode, "width": width, "height": height,

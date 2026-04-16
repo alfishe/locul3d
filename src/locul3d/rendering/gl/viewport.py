@@ -196,6 +196,15 @@ class BaseGLViewport(QOpenGLWidget):
         self._capture_w: Optional[int] = None
         self._capture_h: Optional[int] = None
 
+        # Windows-only workaround: Qt's grabFramebuffer() on Windows
+        # corrupts GL_UNSIGNED_BYTE vertex color attributes during its
+        # internal paint (live view fine, recording produces black
+        # for gray points and saturated primaries for coloured
+        # voxels).  While True, _draw_point_layer forces the float32
+        # color VBO path.  ~3× color VRAM applies only for the
+        # recording session; next paint after stop restores uint8.
+        self._capture_in_progress: bool = False
+
         # Input lock — when True, mouse/keyboard event handlers
         # short-circuit so the recorder can guarantee deterministic
         # captures.  Toggled by the VideoRecorder lifecycle.
@@ -1429,7 +1438,20 @@ class BaseGLViewport(QOpenGLWidget):
         if has_vtx_colors:
             # Prefer compact uint8 colors (3× less VRAM than float32).
             # GL_UNSIGNED_BYTE with glColorPointer normalizes 0-255 → 0.0-1.0.
-            colors_u8 = getattr(layer, 'colors_u8', None)
+            #
+            # On Windows during an active capture session, bypass the
+            # uint8 path: Qt's grabFramebuffer() mishandles uint8 vertex
+            # color attributes during its internal paint (live view is
+            # fine, recorded frames get black/saturated colors).  Fall
+            # through to the float32 path for the recording session.
+            import sys
+            suppress_uint8 = (
+                self._capture_in_progress and sys.platform == "win32"
+            )
+            colors_u8 = (
+                None if suppress_uint8
+                else getattr(layer, 'colors_u8', None)
+            )
             if colors_u8 is not None:
                 if not colors_u8.flags['C_CONTIGUOUS']:
                     layer.colors_u8 = np.ascontiguousarray(colors_u8)
@@ -2137,6 +2159,35 @@ class BaseGLViewport(QOpenGLWidget):
         except Exception:
             pass
         self._vbos.clear()
+
+    def set_capture_in_progress(self, enabled: bool) -> None:
+        """Toggle the Windows grabFramebuffer() uint8-color workaround.
+
+        Must be called by the recording driver at session start and
+        stop so _draw_point_layer knows whether to upload point
+        colors as uint8 (compact, default) or float32 (bug-free on
+        Windows during capture).
+
+        Invalidates every cached ``"rgb"`` VBO on transition so the
+        next paint re-uploads with the format that matches the new
+        mode.  Layer ``gpu_resident`` stays True because the position
+        VBO is untouched, but ``layer.colors`` may have been freed
+        by ``release_source_data_after_vbo`` and will be lazily
+        re-expanded from ``colors_u8`` inside ``get_colors_array()``.
+        """
+        if bool(enabled) == self._capture_in_progress:
+            return
+        self._capture_in_progress = bool(enabled)
+
+        rgb_keys = [k for k in self._vbos if k[1] == "rgb"]
+        if not rgb_keys:
+            return
+        ids = [self._vbos.pop(k) for k in rgb_keys]
+        try:
+            self.makeCurrent()
+            glDeleteBuffers(len(ids), ids)
+        except Exception:
+            pass
 
     # --- Mouse Events ---
 

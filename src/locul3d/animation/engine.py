@@ -386,6 +386,10 @@ class AnimationEngine(QObject):
             self._viewport._preview_mode = False
         except Exception:
             pass
+        try:
+            self._viewport.set_capture_in_progress(False)
+        except AttributeError:
+            pass
 
         if self._recorder is not None:
             try:
