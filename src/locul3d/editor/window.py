@@ -28,7 +28,7 @@ from PySide6.QtGui import QAction, QKeyEvent
 
 from ..core.layer import LayerManager, LayerData
 from ..core.geometry import AnnotationCategory, BBoxItem, GapItem, PlaneItem
-from ..utils.metadata import load_all_metadata, METADATA_HANDLERS
+from ..utils.metadata import load_all_metadata, METADATA_HANDLERS, infer_corridor_axis
 from ..core.constants import (
     COLORS,
     BBOX_COLORS,
@@ -124,6 +124,7 @@ class EditorWindow(QMainWindow):
         self.annotations: List[BBoxItem] = []
         self.planes: List[PlaneItem] = []
         self.gap_items: List[GapItem] = []
+        self._pipeline_corridor_axis: Optional[int] = None  # set when pipeline_context.yaml is loaded
         self._color_idx = 0
         self._plane_color_idx = 0
         self._undo_stack = []
@@ -733,6 +734,9 @@ class EditorWindow(QMainWindow):
                 self.layer_panel.rebuild()
             except Exception:
                 pass
+        # Pre-read corridor axis from pipeline_context.yaml so metadata handlers
+        # use the same axis instead of inferring it independently.
+        self._try_load_pipeline_corridor_axis(folder_path)
         # Auto-detect metadata files
         self._detect_metadata(folder_path)
 
@@ -747,6 +751,7 @@ class EditorWindow(QMainWindow):
         if not folder:
             return
         folder_path = Path(folder)
+        self._try_load_pipeline_corridor_axis(folder_path)
         self._detect_metadata(folder_path, append=True)
         n_groups = len(self.layer_panel.annotation_groups)
         if n_groups:
@@ -755,6 +760,31 @@ class EditorWindow(QMainWindow):
                 f"Loaded metadata: {n_groups} group(s), {n_items} items from {folder_path.name}")
         else:
             self.status_label.setText(f"No metadata files found in {folder_path.name}")
+
+    def _try_load_pipeline_corridor_axis(self, folder_path: Path):
+        """Read corridor_axis from pipeline_context.yaml in folder, if present."""
+        if not HAS_YAML:
+            return
+        ctx_path = folder_path / "pipeline_context.yaml"
+        if not ctx_path.exists():
+            return
+        try:
+            with open(ctx_path) as f:
+                data = yaml.safe_load(f)
+            for src in (
+                data.get("stage3_rack", {}),
+                data.get("stage2", {}).get("corridors", {}),
+                data.get("stage2", {}).get("corridors_sr", {}),
+                data.get("stage5", {}),
+            ):
+                if isinstance(src, dict) and "corridor_axis" in src:
+                    corridor_axis = src["corridor_axis"]
+                    self._pipeline_corridor_axis = 0 if corridor_axis == "X" else 1
+                    print(f"[axis] pre-read from {ctx_path.name}: corridor_axis={corridor_axis} → {self._pipeline_corridor_axis}")
+                    return
+            print(f"[axis] pipeline_context.yaml found but no corridor_axis key in any stage")
+        except Exception as e:
+            print(f"[axis] failed to read {ctx_path}: {e}")
 
     def _detect_metadata(self, folder_path: Path, append: bool = False):
         """Auto-detect and load metadata files from a folder.
@@ -770,13 +800,24 @@ class EditorWindow(QMainWindow):
         new_groups = []
 
         kind_groups = load_all_metadata(folder_path)
+
+        # Determine a single corridor axis for all handlers. Prefer the
+        # authoritative value from pipeline_context.yaml; otherwise infer it
+        # from the most geometrically reliable kind present.
+        if self._pipeline_corridor_axis is not None:
+            corridor_axis = self._pipeline_corridor_axis
+        else:
+            corridor_axis = infer_corridor_axis(kind_groups)
+        print(f"[axis] _detect_metadata: using corridor_axis={corridor_axis} for all handlers")
+
         for kind, items in kind_groups.items():
             handler = METADATA_HANDLERS.get(kind)
             if handler is None:
                 continue
             try:
-                bboxes, gaps, planes = handler.parse(items)
-            except Exception:
+                bboxes, gaps, planes = handler.parse(items, corridor_axis=corridor_axis)
+            except Exception as e:
+                print(f"[axis] handler.parse failed for kind={kind!r}: {e}")
                 continue
             if not bboxes and not gaps:
                 continue
@@ -911,6 +952,7 @@ class EditorWindow(QMainWindow):
                 corridor_axis = src["corridor_axis"]
                 break
         axis = 0 if corridor_axis == "X" else 1
+        self._pipeline_corridor_axis = axis
         cross_axis = 1 - axis
 
         bboxes = []
