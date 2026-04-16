@@ -67,8 +67,7 @@ class MetadataHandler(ABC):
 
         Args:
             items: {idx: data_dict, ...} — already grouped by kind.
-            corridor_axis: 0=X, 1=Y. When provided (e.g. from pipeline_context.yaml),
-                skips auto-detection so all annotation types share the same axis.
+            corridor_axis: 0=X, 1=Y override; inferred from geometry when None.
         """
         if not items:
             return [], [], []

@@ -68,9 +68,6 @@ class EditorViewport(BaseGLViewport):
         self._gl_projection = None
         self._gl_viewport = None
 
-        # Debug: track last-logged gaps to avoid per-frame spam
-        self._logged_gaps = None
-
         self.setMouseTracking(True)  # needed for hover detection
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -508,17 +505,6 @@ class EditorViewport(BaseGLViewport):
         visible_gaps = [g for g in self.gaps if g.visible]
         if not visible_gaps:
             return
-
-        # Debug: log corridor axis for each measurement, but only when the set changes
-        gaps_key = tuple(id(g) for g in visible_gaps)
-        if gaps_key != self._logged_gaps:
-            axis_label = {0: "X", 1: "Y"}
-            for i, gap in enumerate(visible_gaps):
-                axis_str = axis_label.get(gap.axis, str(gap.axis))
-                cat = gap.category.value if gap.category else "unknown"
-                mtype = gap.measurement_type.name if gap.measurement_type else "unknown"
-                print(f"[gap {i}] corridor_axis={axis_str}  category={cat}  type={mtype}  gap_mm={gap.gap_mm}")
-            self._logged_gaps = gaps_key
 
         try:
             from OpenGL.GL import glDisable, glEnable, glLineWidth, glBegin, glEnd
