@@ -61,12 +61,13 @@ class MetadataHandler(ABC):
     wall_dist_color: tuple = (1.0, 0.2, 0.2)  # red
 
     def parse(
-        self, items: dict
+        self, items: dict, corridor_axis: int = None
     ) -> Tuple[List[BBoxItem], List[GapItem], List[PlaneItem]]:
         """Parse pre-loaded metadata items → (bboxes, gaps, planes).
 
         Args:
             items: {idx: data_dict, ...} — already grouped by kind.
+            corridor_axis: 0=X, 1=Y override; inferred from geometry when None.
         """
         if not items:
             return [], [], []
@@ -93,8 +94,11 @@ class MetadataHandler(ABC):
         if not self.enabled_measurements:
             return bboxes, [], []
 
-        # Detect corridor axis
-        axis = _detect_corridor_axis_from_spread(items)
+        # Use authoritative corridor axis if provided, otherwise detect from geometry
+        if corridor_axis is not None:
+            axis = corridor_axis
+        else:
+            axis = _detect_corridor_axis_from_spread(items)
         cross_axis = 1 - axis
 
         # Build neighbor gap pairs
@@ -116,8 +120,8 @@ class MetadataHandler(ABC):
                     key = (min(idx, other), max(idx, other))
                     if key not in pairs:
                         pairs[key] = nb["gap_mm"]
-            # Refine axis from explicit pairs if available
-            if pairs:
+            # Refine axis from explicit pairs, but only when no authoritative axis was given
+            if pairs and corridor_axis is None:
                 axis = _detect_corridor_axis(items, pairs)
                 cross_axis = 1 - axis
 
@@ -514,6 +518,32 @@ def _detect_corridor_axis_from_spread(items):
     dx = max(xs) - min(xs) if xs else 0
     dy = max(ys) - min(ys) if ys else 0
     return 1 if dy >= dx else 0
+
+
+# Kinds whose item spread reliably indicates the corridor axis,
+# in descending priority order. Racks and empty spaces span the corridor;
+# small objects like mts_box do not.
+_AXIS_RELIABLE_KINDS = ("rack", "rack_region", "empty_space", "mts", "mts_stack")
+
+
+def infer_corridor_axis(kind_groups: dict) -> int:
+    """Infer corridor axis (0=X, 1=Y) from the most reliable kind present.
+
+    Tries each kind in _AXIS_RELIABLE_KINDS order, falling back to all items
+    combined if none of the reliable kinds are available.
+    """
+    for kind in _AXIS_RELIABLE_KINDS:
+        items = kind_groups.get(kind)
+        if items:
+            return _detect_corridor_axis_from_spread(items)
+    # Last resort: pool all items together
+    all_items = {}
+    offset = 0
+    for items in kind_groups.values():
+        for v in items.values():
+            all_items[offset] = v
+            offset += 1
+    return _detect_corridor_axis_from_spread(all_items) if all_items else 0
 
 
 def _compute_neighbor_pairs_from_scalars(items, axis):

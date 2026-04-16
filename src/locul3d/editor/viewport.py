@@ -635,14 +635,16 @@ class EditorViewport(BaseGLViewport):
         outline = QColor(255, 255, 255)
         default_color = (1.0, 0.2, 0.2)
 
+        dpr = self.devicePixelRatioF()
+
         for gap in visible_gaps:
             gc = gap.color or default_color
             text_color = QColor(int(gc[0] * 255), int(gc[1] * 255), int(gc[2] * 255))
 
             sa_x, sa_y = project_to_screen(gap.edge_a, mv, proj, vp)
             sb_x, sb_y = project_to_screen(gap.edge_b, mv, proj, vp)
+            sa_x /= dpr; sa_y /= dpr; sb_x /= dpr; sb_y /= dpr
             mid = (gap.edge_a + gap.edge_b) / 2.0
-            sx, sy = project_to_screen(mid, mv, proj, vp)
 
             if gap.gap_mm is None:
                 continue  # spine connector — no label
@@ -655,11 +657,13 @@ class EditorViewport(BaseGLViewport):
                 t = gap.label_t
                 label_pos = gap.edge_a * (1 - t) + gap.edge_b * t
                 lx, ly = project_to_screen(label_pos, mv, proj, vp)
+                lx /= dpr; ly /= dpr
                 tx, ty = int(lx - tw / 2), int(ly - 8)
             else:
                 # Short bracket — place text past the bracket
                 offset_mid = mid + gap.tick_dir * 1.5
                 px, py = project_to_screen(offset_mid, mv, proj, vp)
+                px /= dpr; py /= dpr
                 tx, ty = int(px - tw / 2), int(py - 4)
 
             # Draw white outline then red text for contrast
@@ -705,7 +709,10 @@ class EditorViewport(BaseGLViewport):
         bbox = self.annotations[self.selected_idx]
         c = bbox.center_pos
         gizmo_len = self._gizmo_len(bbox)
-        thr = GIZMO_HIT_PX
+        dpr = self.devicePixelRatioF()
+        screen_x *= dpr
+        screen_y *= dpr
+        thr = GIZMO_HIT_PX * dpr
 
         # --- Build all test points and their metadata ---
         points = []    # 3D world positions
@@ -813,6 +820,8 @@ class EditorViewport(BaseGLViewport):
     def mousePressEvent(self, event: QMouseEvent):
         pos = event.position()
         sx, sy = pos.x(), pos.y()
+        dpr = self.devicePixelRatioF()
+        psx, psy = sx * dpr, sy * dpr
 
         if event.button() == Qt.MouseButton.LeftButton:
             mods = event.modifiers()
@@ -825,7 +834,7 @@ class EditorViewport(BaseGLViewport):
             # Reference point picking mode
             if self._picking_ref_point:
                 self.makeCurrent()
-                pt = self._pick_3d(sx, sy)
+                pt = self._pick_3d(psx, psy)
                 self.doneCurrent()
                 if pt is not None:
                     self._picking_ref_point = False
@@ -835,7 +844,7 @@ class EditorViewport(BaseGLViewport):
             # Ctrl+Click: pick point → create new bbox (any tool mode)
             if mods & Qt.KeyboardModifier.ControlModifier:
                 self.makeCurrent()
-                pt = self._pick_3d(sx, sy)
+                pt = self._pick_3d(psx, psy)
                 self.doneCurrent()
                 if pt is not None:
                     self.point_picked.emit(float(pt[0]), float(pt[1]), float(pt[2]))
@@ -905,7 +914,7 @@ class EditorViewport(BaseGLViewport):
             # --- Click on bbox to select ---
             self.makeCurrent()
             origin, direction = ray_from_mouse(
-                sx, sy, self._gl_modelview, self._gl_projection, self._gl_viewport)
+                psx, psy, self._gl_modelview, self._gl_projection, self._gl_viewport)
             self.doneCurrent()
             hit_idx = self._find_nearest_bbox(origin, direction)
 
@@ -930,6 +939,8 @@ class EditorViewport(BaseGLViewport):
     def mouseMoveEvent(self, event: QMouseEvent):
         pos = event.position()
         sx, sy = pos.x(), pos.y()
+        dpr = self.devicePixelRatioF()
+        psx, psy = sx * dpr, sy * dpr
 
         # --- Gizmo drags ---
         if self._drag_mode == 'gizmo_move' and self.selected_idx >= 0:
@@ -942,7 +953,8 @@ class EditorViewport(BaseGLViewport):
             axis_len_screen = np.linalg.norm(axis_dir_screen)
             if axis_len_screen > 0.5:
                 axis_dir_screen /= axis_len_screen
-                mouse_delta = np.array([sx - self._drag_start[0], sy - self._drag_start[1]])
+                mouse_delta = np.array([(sx - self._drag_start[0]) * dpr,
+                                        (sy - self._drag_start[1]) * dpr])
                 px_along = np.dot(mouse_delta, axis_dir_screen)
                 world_delta = px_along / axis_len_screen
                 new_center = self._drag_orig_center.copy()
@@ -962,7 +974,8 @@ class EditorViewport(BaseGLViewport):
             axis_len_screen = np.linalg.norm(axis_dir_screen)
             if axis_len_screen > 0.5:
                 axis_dir_screen /= axis_len_screen
-                mouse_delta = np.array([sx - self._drag_start[0], sy - self._drag_start[1]])
+                mouse_delta = np.array([(sx - self._drag_start[0]) * dpr,
+                                        (sy - self._drag_start[1]) * dpr])
                 px_along = np.dot(mouse_delta, axis_dir_screen)
                 world_delta = px_along / axis_len_screen
                 new_size = self._drag_orig_size.copy()
@@ -999,7 +1012,8 @@ class EditorViewport(BaseGLViewport):
                 axis_len_screen = np.linalg.norm(axis_dir_screen)
                 if axis_len_screen > 0.5:
                     axis_dir_screen /= axis_len_screen
-                    mouse_delta = np.array([sx - self._drag_start[0], sy - self._drag_start[1]])
+                    mouse_delta = np.array([(sx - self._drag_start[0]) * dpr,
+                                            (sy - self._drag_start[1]) * dpr])
                     px_along = np.dot(mouse_delta, axis_dir_screen)
                     world_delta = px_along / axis_len_screen
                     new_center = self._drag_orig_center.copy()
@@ -1010,10 +1024,10 @@ class EditorViewport(BaseGLViewport):
             else:
                 from ..utils.math import project_point_to_camera_plane
                 start_world = project_point_to_camera_plane(
-                    self._drag_start[0], self._drag_start[1], self._drag_orig_center,
+                    self._drag_start[0] * dpr, self._drag_start[1] * dpr, self._drag_orig_center,
                     self._gl_modelview, self._gl_projection, self._gl_viewport)
                 current_world = project_point_to_camera_plane(
-                    sx, sy, self._drag_orig_center,
+                    psx, psy, self._drag_orig_center,
                     self._gl_modelview, self._gl_projection, self._gl_viewport)
                 if start_world is not None and current_world is not None:
                     delta = current_world - start_world
@@ -1032,7 +1046,7 @@ class EditorViewport(BaseGLViewport):
         # --- Hover detection (no drag active) ---
         if self._drag_mode is None and self.selected_idx >= 0:
             old_hov = self._hovered_gizmo
-            self._hovered_gizmo = self._hit_test_gizmo(sx, sy)
+            self._hovered_gizmo = self._hit_test_gizmo(psx, psy)
             if self._hovered_gizmo != old_hov:
                 if self._hovered_gizmo is not None:
                     op = self._hovered_gizmo[0]
