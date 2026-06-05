@@ -567,66 +567,71 @@ class E57ImportWorker(QThread):
         self._log(f"CV phys={cv_phys_off}, first data pkt at "
                   f"log={first_pkt_log}")
 
-        # -- 3. Parse first data packet header for stream layout -----------
-        pkt_hdr_bytes = _strip_crc_region(raw_arr, first_pkt_phys, 256)
-        typ, _, plen_m1, bcount = struct.unpack('<BBHH',
-                                                pkt_hdr_bytes[:6].tobytes())
-        if typ != 1:
-            raise ValueError(
-                f"Expected data packet (type=1) at log={first_pkt_log}, "
-                f"got type={typ} — file structure differs from expected")
-        pkt_size   = plen_m1 + 1
-        pkt_header = 6 + bcount * 2
-        bslens = struct.unpack(
-            f'<{bcount}H', pkt_hdr_bytes[6:pkt_header].tobytes())
-
-        # Derive bytes-per-point from stream layout (4 for float32/int32)
+        # -- 3. Robust sequentially scanned pre-indexing (handles variable sizes) --
+        self._log("Pre-indexing E57 data packets...")
+        t_index = time.time()
+        pkt_log_offsets = []
+        pkt_pts_counts = []
+        pkt_bcounts = []
+        cur_log = first_pkt_log
+        total_pts = 0
         xyz_bpp = proto.get('cartesianX', {}).get('bytes', 4)
-        pts_per_pkt = bslens[x_idx] // xyz_bpp
 
-        n_full = (n // pts_per_pkt) * pts_per_pkt
-        n_pkts = n_full // pts_per_pkt
-        self._log(f"Packet: {pkt_size}B, {bcount} streams, "
-                  f"{pts_per_pkt} pts/pkt, {n_pkts} packets")
+        while total_pts < n:
+            cur_phys = _log_to_phys(cur_log)
+            page_offset = cur_phys % PAGE_SIZE
+            if page_offset <= DATA_PER_PAGE - 6:
+                hdr_bytes = raw_arr[cur_phys : cur_phys + 6].tobytes()
+            else:
+                hdr_bytes = _strip_crc_region(raw_arr, cur_phys, 6).tobytes()
+            ptype, _, plen_m1, bcount_ = struct.unpack('<BBHH', hdr_bytes)
+            psize = plen_m1 + 1
+            if ptype != 1:
+                break
+            pkt_log_offsets.append(cur_log)
+            pkt_bcounts.append(bcount_)
+            pkt_header = 6 + bcount_ * 2
+            if page_offset <= DATA_PER_PAGE - pkt_header:
+                full_hdr = raw_arr[cur_phys : cur_phys + pkt_header].tobytes()
+            else:
+                full_hdr = _strip_crc_region(raw_arr, cur_phys, pkt_header).tobytes()
+            bslens = struct.unpack(f"<{bcount_}H", full_hdr[6:pkt_header])
+            pts = bslens[x_idx] // xyz_bpp
+            pkt_pts_counts.append(pts)
+            total_pts += pts
+            cur_log += psize
 
-        # -- 4+5. Chunked CRC strip + extraction ----------------------------
-        t0 = time.time()
-        x_off = pkt_header + sum(bslens[:x_idx])
-        y_off = pkt_header + sum(bslens[:y_idx])
-        z_off = pkt_header + sum(bslens[:z_idx])
-        x_len = bslens[x_idx]
+        pkt_log_offsets.append(cur_log)
+        n_pkts = len(pkt_pts_counts)
+        self._log(f"Pre-indexed {n_pkts} packets in {time.time() - t_index:.3f}s. Total points: {total_pts:,}")
 
-        # Output array (always float32, F-order for column-contiguous access)
-        xyz = np.empty((n_full, 3), dtype=np.float32, order='F')
+        # -- 4. Allocation ----------------------------
+        xyz = np.empty((total_pts, 3), dtype=np.float32, order='F')
         xc, yc, zc = xyz[:, 0], xyz[:, 1], xyz[:, 2]
 
-        # Choose extraction buffer based on field encoding
         is_scaled = (xyz_type == 'scaledInteger')
         if is_scaled:
-            # Separate uint32 buffer — E57 stores unsigned offset from minimum
-            xyz_raw = np.empty((n_full, 3), dtype=np.uint32, order='F')
+            xyz_raw = np.empty((total_pts, 3), dtype=np.uint32, order='F')
             xr, yr, zr = xyz_raw[:, 0], xyz_raw[:, 1], xyz_raw[:, 2]
         else:
             xr, yr, zr = xc, yc, zc
 
         colors_u8 = None
         if has_rgb:
-            r_off = pkt_header + sum(bslens[:r_idx])
-            g_off = pkt_header + sum(bslens[:g_idx])
-            b_off = pkt_header + sum(bslens[:b_idx])
-            r_len = bslens[r_idx]
-            colors_u8 = np.empty((n_full, 3), dtype=np.uint8, order='F')
+            colors_u8 = np.empty((total_pts, 3), dtype=np.uint8, order='F')
             rc, gc_, bc = colors_u8[:, 0], colors_u8[:, 1], colors_u8[:, 2]
 
-        # Process ~10000 packets per chunk (~500 MB raw data)
+        raw_view_dtype = np.uint32 if is_scaled else np.float32
+
+        # -- 5. Chunked CRC strip + extraction ----------------------------
+        t_extr_start = time.time()
         CHUNK_PKTS = 10000
         for chunk_start in range(0, n_pkts, CHUNK_PKTS):
             chunk_end = min(chunk_start + CHUNK_PKTS, n_pkts)
             chunk_n = chunk_end - chunk_start
 
-            # CRC strip this chunk's pages from the raw file buffer
-            c_log_start = first_pkt_log + chunk_start * pkt_size
-            c_log_end = first_pkt_log + chunk_end * pkt_size
+            c_log_start = pkt_log_offsets[chunk_start]
+            c_log_end = pkt_log_offsets[chunk_end]
             c_start_page = _log_to_phys(c_log_start) // PAGE_SIZE
             c_end_page = min(_log_to_phys(c_log_end) // PAGE_SIZE + 1,
                              len(raw_arr) // PAGE_SIZE)
@@ -639,21 +644,34 @@ class E57ImportWorker(QThread):
             c_local = c_log_start - c_start_page * DATA_PER_PAGE
             d = c_logical[c_local:]
 
-            raw_view_dtype = np.uint32 if is_scaled else np.float32
-
-            # Extract fields from this chunk (F-order columns are contiguous)
+            chunk_start_pt = sum(pkt_pts_counts[:chunk_start])
+            s = chunk_start_pt
             for i in range(chunk_n):
-                o = i * pkt_size
                 pkt_idx = chunk_start + i
-                s = pkt_idx * pts_per_pkt
-                e = s + pts_per_pkt
-                xr[s:e] = d[o + x_off : o + x_off + x_len].view(raw_view_dtype)
-                yr[s:e] = d[o + y_off : o + y_off + x_len].view(raw_view_dtype)
-                zr[s:e] = d[o + z_off : o + z_off + x_len].view(raw_view_dtype)
+                o = pkt_log_offsets[pkt_idx] - c_log_start
+                pts = pkt_pts_counts[pkt_idx]
+                e = s + pts
+
+                # Parse dynamic stream offsets
+                bcount_ = pkt_bcounts[pkt_idx]
+                pkt_header = 6 + bcount_ * 2
+                bslens = struct.unpack(f"<{bcount_}H", d[o + 6 : o + pkt_header].tobytes())
+                x_off = pkt_header + sum(bslens[:x_idx])
+                y_off = pkt_header + sum(bslens[:y_idx])
+                z_off = pkt_header + sum(bslens[:z_idx])
+
+                xr[s:e] = d[o + x_off : o + x_off + pts * xyz_bpp].view(raw_view_dtype)
+                yr[s:e] = d[o + y_off : o + y_off + pts * xyz_bpp].view(raw_view_dtype)
+                zr[s:e] = d[o + z_off : o + z_off + pts * xyz_bpp].view(raw_view_dtype)
+
                 if colors_u8 is not None:
-                    rc[s:e] = d[o + r_off : o + r_off + r_len]
-                    gc_[s:e] = d[o + g_off : o + g_off + r_len]
-                    bc[s:e] = d[o + b_off : o + b_off + r_len]
+                    r_off = pkt_header + sum(bslens[:r_idx])
+                    g_off = pkt_header + sum(bslens[:g_idx])
+                    b_off = pkt_header + sum(bslens[:b_idx])
+                    rc[s:e] = d[o + r_off : o + r_off + pts]
+                    gc_[s:e] = d[o + g_off : o + g_off + pts]
+                    bc[s:e] = d[o + b_off : o + b_off + pts]
+                s = e
 
             del c_region, c_pages, c_logical, d
 
@@ -676,22 +694,24 @@ class E57ImportWorker(QThread):
             del xyz_raw
 
             self._log(f"ScaledInteger → float32 conversion applied "
-                      f"(scale={xyz_scale:.2e}, {n_full:,} pts)")
+                      f"(scale={xyz_scale:.2e}, {total_pts:,} pts)")
 
         t_parse = time.time() - t0
         self._log(f"Chunked parse: {t_parse:.2f}s "
-                  f"({n_full / t_parse / 1e6:.1f} Mpts/s)")
+                  f"({total_pts / t_parse / 1e6:.1f} Mpts/s)")
 
-        # Integrity check: reject if data is garbage
-        sample = xyz[::max(1, n_full // 10000)]
-        if np.isnan(sample).any() or np.isinf(sample).any():
+        # Integrity check: reject if data is garbage or has massive coordinate bounds
+        sample = xyz[::max(1, total_pts // 10000)]
+        span = sample.max(axis=0) - sample.min(axis=0)
+        if np.isnan(sample).any() or np.isinf(sample).any() or (span > 2000.0).any():
             del raw_arr
             gc.collect()
-            raise ValueError("Fast read produced NaN/Inf — falling back")
+            raise ValueError("Fast read produced NaN/Inf or extreme outliers — falling back")
 
         del raw_arr
         gc.collect()
         return xyz, colors_u8
+    
     # ------------------------------------------------------------------
     # Fallback: libe57 SourceDestBuffer reader
     # ------------------------------------------------------------------
