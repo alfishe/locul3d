@@ -148,6 +148,11 @@ class E57ImportWorker(QThread):
         self._align_R = np.eye(3)        # rotation matrix
         self._align_center = np.zeros(3) # rotation center
         self._align_z_shift = 0.0        # vertical translation
+        # E57 pose from file (set by _stage_ingest)
+        self._e57_pose_rotation = None   # quaternion [w, x, y, z]
+        self._e57_pose_translation = None  # [x, y, z]
+        self._e57_pose_R = np.eye(3)     # rotation matrix from quaternion
+        self._e57_pose_t = np.zeros(3)   # translation vector
 
     def cancel(self):
         self._cancelled = True
@@ -337,6 +342,10 @@ class E57ImportWorker(QThread):
         if hasattr(header, "translation") and header.translation is not None:
             pose_meta["translation"] = list(header.translation)
         meta["scan_pose"] = pose_meta
+
+        # Store pose for later application
+        self._e57_pose_rotation = pose_meta.get("rotation_quaternion")
+        self._e57_pose_translation = pose_meta.get("translation")
         meta["file_name"] = Path(path).name
         meta["file_size_mb"] = round(file_size_mb, 1)
         meta["format"] = "E57"
@@ -782,6 +791,30 @@ class E57ImportWorker(QThread):
     # ------------------------------------------------------------------
 
     def _stage_align(self, pcd):
+        # Apply E57 pose if available (transform from scanner to world coords)
+        if self._e57_pose_rotation is not None or self._e57_pose_translation is not None:
+            self._log("Applying E57 scan pose...")
+
+            # Convert quaternion to rotation matrix
+            if self._e57_pose_rotation is not None:
+                w, x, y, z = self._e57_pose_rotation
+                # Quaternion to rotation matrix
+                R_pose = np.array([
+                    [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
+                    [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+                    [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]
+                ])
+                self._e57_pose_R = R_pose  # Store for raw points
+                pcd.rotate(R_pose, center=[0, 0, 0])
+                self._log(f"  Rotation applied (quat: w={w:.4f}, x={x:.4f}, y={y:.4f}, z={z:.4f})")
+
+            # Apply translation
+            if self._e57_pose_translation is not None:
+                t = np.array(self._e57_pose_translation)
+                self._e57_pose_t = t  # Store for raw points
+                pcd.translate(t)
+                self._log(f"  Translation applied: [{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}]")
+
         pts = np.asarray(pcd.points)
         z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
         z_range = z_max - z_min
@@ -880,7 +913,25 @@ class E57ImportWorker(QThread):
         n_pts = len(raw_pts)
         
         # ------------------------------------------------------------------
-        # Part 1: Direct Alignment (Single-thread BLAS/AMX Native)
+        # Part 1a: Apply E57 Pose (scanner to world transform)
+        # ------------------------------------------------------------------
+        if not np.allclose(self._e57_pose_R, np.eye(3)) or np.any(self._e57_pose_t != 0):
+            self.stage_progress.emit("Applying E57 pose to raw scan...", 2)
+            t_pose = time.time()
+            R_pose = self._e57_pose_R.astype(np.float32)
+            t_pose_vec = self._e57_pose_t.astype(np.float32)
+
+            # Apply rotation then translation: pts @ R_pose.T + t_pose
+            CHUNK = 10_000_000
+            for s in range(0, n_pts, CHUNK):
+                e = min(s + CHUNK, n_pts)
+                chunk = raw_pts[s:e].copy()
+                raw_pts[s:e] = chunk @ R_pose.T + t_pose_vec
+
+            self._log(f"E57 pose applied to raw: {time.time() - t_pose:.2f}s")
+
+        # ------------------------------------------------------------------
+        # Part 1b: Direct Alignment (Single-thread BLAS/AMX Native)
         # ------------------------------------------------------------------
         self.stage_progress.emit("Aligning raw scan...", 5)
         t_align = time.time()
@@ -889,7 +940,7 @@ class E57ImportWorker(QThread):
         R = self._align_R.astype(np.float32)
         center = self._align_center.astype(np.float32)
         z_shift = float(self._align_z_shift)
-        
+
         # Transform: (pts - center) @ R.T + shift_back
         # Simplified: pts @ R.T + (shift_back - center @ R.T)
         shift_back_vec = center - np.array([0, 0, z_shift], dtype=np.float32)
