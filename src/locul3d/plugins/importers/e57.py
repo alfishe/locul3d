@@ -431,82 +431,115 @@ class E57ImportWorker(QThread):
 
     @staticmethod
     def _parse_prototype(xml_bytes):
-        """Parse the E57 XML prototype to discover field encodings.
+        """Parse the E57 XML prototype of the first scan's points.
 
-        Returns dict: field_name → {'type': 'float'|'scaledInteger'|'integer',
-                                     'scale': float, 'offset': float,
-                                     'bytes': int}
+        Returns dict in prototype (= bytestream) order:
+            field_name → {'type': 'float'|'scaledInteger'|'integer',
+                          'bits': int,      # bitPackCodec width per record
+                          'minimum': int, 'maximum': int,
+                          'scale': float, 'offset': float}
         """
         import re
         xml_str = xml_bytes.decode('utf-8', errors='replace')
 
         fields = {}
-        # Match prototype entries:
-        #   <cartesianX type="ScaledInteger" minimum="..." maximum="..." scale="..." offset="..."/>
-        #   <cartesianX type="Float" precision="single" .../>
-        #   <colorRed type="Integer" minimum="0" maximum="255"/>
-        proto_match = re.search(r'<prototype[^>]*>(.*?)</prototype>', xml_str,
-                                re.DOTALL)
+        # Use the prototype of data3D[0]/points -- some files have other
+        # CompressedVectors (e.g. pointGroupingSchemes) earlier in the XML
+        points = re.search(r'<points\b[^>]*type="CompressedVector"', xml_str)
+        proto_match = re.compile(r'<prototype[^>]*>(.*?)</prototype>',
+                                 re.DOTALL).search(
+            xml_str, points.start() if points else 0)
         if not proto_match:
             return fields
 
         proto = proto_match.group(1)
-        # Each field is a self-closing tag: <fieldName attr1="val" .../>
-        for m in re.finditer(
-                r'<(\w+)\s+([^>]*?)/>',
-                proto):
+        # Each field is a tag: <fieldName attr1="val" .../> (or <...></...>),
+        # extension fields are namespaced (e.g. <nor:normalX .../>):
+        #   <cartesianX type="ScaledInteger" minimum="..." maximum="..." scale="..." offset="..."/>
+        #   <cartesianX type="Float" precision="single" .../>
+        #   <colorRed type="Integer" minimum="0" maximum="255"/>
+        for m in re.finditer(r'<([\w:.-]+)\s+([^>]*?)/?>', proto):
             name = m.group(1)
             attrs = m.group(2)
 
             def _attr(key, default=None):
-                am = re.search(rf'{key}="([^"]*)"', attrs)
+                am = re.search(rf'\b{key}="([^"]*)"', attrs)
                 return am.group(1) if am else default
 
             ftype = (_attr('type') or '').lower()
-            if ftype == 'scaledinteger':
-                scale = float(_attr('scale', '1'))
-                offset = float(_attr('offset', '0'))
-                mn, mx = int(_attr('minimum', '0')), int(_attr('maximum', '0'))
-                # Determine integer width from range
-                if mn >= -128 and mx <= 127:
-                    bpp = 1
-                elif mn >= -32768 and mx <= 32767:
-                    bpp = 2
-                else:
-                    bpp = 4
-                fields[name] = {'type': 'scaledInteger', 'scale': scale,
-                                'offset': offset, 'minimum': mn,
-                                'maximum': mx, 'bytes': bpp}
+            if ftype in ('scaledinteger', 'integer'):
+                mn = int(float(_attr('minimum', '0')))
+                mx = int(float(_attr('maximum', '0')))
+                fields[name] = {
+                    'type': 'scaledInteger' if ftype == 'scaledinteger' else 'integer',
+                    'bits': (mx - mn).bit_length(),
+                    'minimum': mn, 'maximum': mx,
+                    'scale': float(_attr('scale', '1')),
+                    'offset': float(_attr('offset', '0')),
+                }
             elif ftype == 'float':
-                prec = (_attr('precision') or 'single').lower()
-                bpp = 8 if prec == 'double' else 4
-                fields[name] = {'type': 'float', 'scale': 1.0,
-                                'offset': 0.0, 'bytes': bpp}
-            elif ftype == 'integer':
-                mn = int(_attr('minimum', '0'))
-                mx = int(_attr('maximum', '255'))
-                if mx <= 255 and mn >= 0:
-                    bpp = 1
-                elif mx <= 65535 and mn >= 0:
-                    bpp = 2
-                else:
-                    bpp = 4
-                fields[name] = {'type': 'integer', 'scale': 1.0,
-                                'offset': 0.0, 'bytes': bpp}
+                prec = (_attr('precision') or 'double').lower()
+                fields[name] = {'type': 'float',
+                                'bits': 32 if prec == 'single' else 64,
+                                'minimum': 0, 'maximum': 0,
+                                'scale': 1.0, 'offset': 0.0}
         return fields
+
+    @staticmethod
+    def _unpack_bits(buf, count, bits):
+        """Decode `count` unsigned values of `bits` width from a bitPackCodec
+        byte stream (little-endian, LSB-first, records may span bytes)."""
+        if bits == 0:
+            return np.zeros(count, dtype=np.uint64)
+        if bits in (8, 16, 32, 64):
+            return buf[:count * bits // 8].view(f'<u{bits // 8}')
+        if bits % 8 == 0:
+            # Whole bytes (24/40/48/56-bit): combine byte columns
+            nb = bits // 8
+            cols = buf[:count * nb].reshape(count, nb)
+            out = cols[:, 0].astype(np.uint64)
+            for j in range(1, nb):
+                out |= cols[:, j].astype(np.uint64) << np.uint64(8 * j)
+            return out
+        if bits > 56:
+            raise ValueError(f"Unsupported bitPack width: {bits}")
+
+        out = np.empty(count, dtype=np.uint64)
+        mask = np.uint64((1 << bits) - 1)
+        span = (bits + 7 + 7) // 8          # bytes touched by one record
+        padded = np.concatenate([buf, np.zeros(8, dtype=np.uint8)])
+        BLOCK = 1 << 22                     # bound temporary memory
+        for s in range(0, count, BLOCK):
+            e = min(s + BLOCK, count)
+            bitpos = np.arange(s, e, dtype=np.uint64) * np.uint64(bits)
+            byte = (bitpos >> np.uint64(3)).astype(np.int64)
+            acc = padded[byte].astype(np.uint64)
+            for j in range(1, span):
+                acc |= padded[byte + j].astype(np.uint64) << np.uint64(8 * j)
+            out[s:e] = (acc >> (bitpos & np.uint64(7))) & mask
+        return out
 
     def _fast_binary_read(self, path, n, has_rgb, field_names):
         """Vectorized E57 binary reader -- bypasses libE57Format codec.
 
         Adapts to the actual E57 data structure by parsing the XML
-        prototype to discover field encodings:
-          - Float (single/double): read as float32/float64
-          - ScaledInteger: read as int32, convert via value * scale + offset
-          - Integer: read as uint8/uint16/uint32
+        prototype to discover field encodings (bitPackCodec):
+          - Float (single/double)
+          - ScaledInteger: raw unsigned offset from minimum,
+            value = (raw + minimum) * scale + offset
+          - Integer: value = raw + minimum
+        Any bit width is supported; 8/16/32/64-bit fields are copied
+        directly, others are bit-unpacked.
 
         E57 page layout: every 1024 physical bytes, the last 4 are a CRC32C
         checksum.  The first 1020 bytes carry payload ("logical" bytes).
         Data packets are laid out contiguously in the logical stream.
+
+        Packets are walked by their own headers, so packets of different
+        sizes (e.g. incrementally written files) and a short last packet
+        are handled.  Runs of identically laid out packets (the common case)
+        are extracted with one strided 2D copy per field instead of a
+        per-packet loop.
         """
         import gc, struct, re
 
@@ -529,23 +562,13 @@ class E57ImportWorker(QThread):
             lo = _phys_to_log(phys_start) - sp * DATA_PER_PAGE
             return lg[lo : lo + n_log_bytes]
 
-        # -- Map field names to stream indices ----------------------------
-        try:
-            x_idx = field_names.index('cartesianX')
-            y_idx = field_names.index('cartesianY')
-            z_idx = field_names.index('cartesianZ')
-            r_idx = field_names.index('colorRed') if has_rgb else -1
-            g_idx = field_names.index('colorGreen') if has_rgb else -1
-            b_idx = field_names.index('colorBlue') if has_rgb else -1
-        except (ValueError, AttributeError):
-            raise ValueError("Required fields not found in stream map")
-
         # -- 1. Read entire file (single sequential I/O) ------------------
         t0 = time.time()
         raw_arr = np.fromfile(path, dtype=np.uint8)
         t_read = time.time() - t0
         file_mb = len(raw_arr) / 1024**2
-        self._log(f"File read: {t_read:.2f}s ({file_mb / t_read:.0f} MB/s)")
+        self._log(f"File read: {t_read:.2f}s ({file_mb / max(t_read, 1e-6):.0f} MB/s)")
+        n_pages = len(raw_arr) // PAGE_SIZE
 
         # -- 2. Parse E57 header → XML → CV offset + field types ----------
         raw_hdr = bytes(raw_arr[:48])
@@ -554,145 +577,178 @@ class E57ImportWorker(QThread):
 
         xml_bytes = _strip_crc_region(raw_arr, xml_phys_off,
                                       xml_phys_len).tobytes()
-        m = re.search(rb'fileOffset="(\d+)"', xml_bytes)
+        m = re.search(rb'<points\b[^>]*\bfileOffset="(\d+)"', xml_bytes)
         cv_phys_off = int(m.group(1)) if m else 48
 
         # Parse field encodings from prototype
         proto = self._parse_prototype(xml_bytes)
-        xyz_proto = proto.get('cartesianX', {})
-        xyz_type = xyz_proto.get('type', 'float')
-        xyz_scale = xyz_proto.get('scale', 1.0)
-        xyz_offset = xyz_proto.get('offset', 0.0)
-        xyz_minimum = xyz_proto.get('minimum', 0)
-        if xyz_type == 'scaledInteger':
-            self._log(f"XYZ encoding: ScaledInteger "
-                      f"(scale={xyz_scale:.2e}, offset={xyz_offset}, "
-                      f"minimum={xyz_minimum})")
-        else:
-            self._log(f"XYZ encoding: {xyz_type}")
+        stream_names = list(proto)          # bytestream order
+        xyz_names = ('cartesianX', 'cartesianY', 'cartesianZ')
+        rgb_names = ('colorRed', 'colorGreen', 'colorBlue') if has_rgb else ()
+        if any(f not in proto for f in xyz_names + rgb_names):
+            raise ValueError("Required fields not found in prototype")
+        self._log("Fields: " + ", ".join(
+            f"{f}={proto[f]['type']}/{proto[f]['bits']}b"
+            for f in xyz_names + rgb_names))
 
-        first_pkt_log = _phys_to_log(cv_phys_off) + 32
-        first_pkt_phys = _log_to_phys(first_pkt_log)
+        # Section header: id, reserved, sectionLength, dataPhysicalOffset
+        cv_log = _phys_to_log(cv_phys_off)
+        sec = _strip_crc_region(raw_arr, cv_phys_off, 32).tobytes()
+        section_len, data_phys_off = struct.unpack_from('<QQ', sec, 8)
+        section_end_log = cv_log + section_len
+        first_pkt_log = _phys_to_log(data_phys_off)
+        if not (cv_log + 32 <= first_pkt_log < section_end_log):
+            first_pkt_log = cv_log + 32
         self._log(f"CV phys={cv_phys_off}, first data pkt at "
-                  f"log={first_pkt_log}")
+                  f"log={first_pkt_log}, section end log={section_end_log}")
 
-        # -- 3. Parse first data packet header for stream layout -----------
-        pkt_hdr_bytes = _strip_crc_region(raw_arr, first_pkt_phys, 256)
-        typ, _, plen_m1, bcount = struct.unpack('<BBHH',
-                                                pkt_hdr_bytes[:6].tobytes())
-        if typ != 1:
-            raise ValueError(
-                f"Expected data packet (type=1) at log={first_pkt_log}, "
-                f"got type={typ} — file structure differs from expected")
-        pkt_size   = plen_m1 + 1
-        pkt_header = 6 + bcount * 2
-        bslens = struct.unpack(
-            f'<{bcount}H', pkt_hdr_bytes[6:pkt_header].tobytes())
+        # -- 3. Destination byte buffers per field ------------------------
+        # Output arrays (always float32 / uint8, F-order for column access).
+        # Byte-aligned fields matching the output type are written straight
+        # into the output columns; others go to a byte buffer and are decoded.
+        xyz = np.empty((n, 3), dtype=np.float32, order='F')
+        colors_u8 = (np.empty((n, 3), dtype=np.uint8, order='F')
+                     if has_rgb else None)
 
-        # Derive bytes-per-point from stream layout (4 for float32/int32)
-        xyz_bpp = proto.get('cartesianX', {}).get('bytes', 4)
-        pts_per_pkt = bslens[x_idx] // xyz_bpp
+        targets = []   # [stream index, dest uint8 buffer, required bytes, filled]
+        decode = {}    # field → dest buffer needing decoding
+        for col, f in enumerate(xyz_names):
+            p = proto[f]
+            if p['type'] == 'float' and p['bits'] == 32:
+                dest = xyz[:, col].view(np.uint8)
+            else:
+                dest = np.empty((n * p['bits'] + 7) // 8, dtype=np.uint8)
+                decode[f] = dest
+            targets.append([stream_names.index(f), dest, len(dest), 0])
+        for col, f in enumerate(rgb_names):
+            p = proto[f]
+            if p['type'] == 'integer' and p['bits'] == 8 and p['minimum'] == 0:
+                dest = colors_u8[:, col].view(np.uint8)
+            else:
+                dest = np.empty((n * p['bits'] + 7) // 8, dtype=np.uint8)
+                decode[f] = dest
+            targets.append([stream_names.index(f), dest, len(dest), 0])
 
-        n_full = (n // pts_per_pkt) * pts_per_pkt
-        n_pkts = n_full // pts_per_pkt
-        self._log(f"Packet: {pkt_size}B, {bcount} streams, "
-                  f"{pts_per_pkt} pts/pkt, {n_pkts} packets")
-
-        # -- 4+5. Chunked CRC strip + extraction ----------------------------
+        # -- 4. Chunked CRC strip + packet walk ---------------------------
         t0 = time.time()
-        x_off = pkt_header + sum(bslens[:x_idx])
-        y_off = pkt_header + sum(bslens[:y_idx])
-        z_off = pkt_header + sum(bslens[:z_idx])
-        x_len = bslens[x_idx]
+        CHUNK_BYTES = 256 * 1024**2         # logical bytes per chunk
+        n_packets = 0
+        n_runs = 0
+        pos = first_pkt_log
 
-        # Output array (always float32, F-order for column-contiguous access)
-        xyz = np.empty((n_full, 3), dtype=np.float32, order='F')
-        xc, yc, zc = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+        def _all_filled():
+            return all(t[3] >= t[2] for t in targets)
 
-        # Choose extraction buffer based on field encoding
-        is_scaled = (xyz_type == 'scaledInteger')
-        if is_scaled:
-            # Separate uint32 buffer — E57 stores unsigned offset from minimum
-            xyz_raw = np.empty((n_full, 3), dtype=np.uint32, order='F')
-            xr, yr, zr = xyz_raw[:, 0], xyz_raw[:, 1], xyz_raw[:, 2]
-        else:
-            xr, yr, zr = xc, yc, zc
-
-        colors_u8 = None
-        if has_rgb:
-            r_off = pkt_header + sum(bslens[:r_idx])
-            g_off = pkt_header + sum(bslens[:g_idx])
-            b_off = pkt_header + sum(bslens[:b_idx])
-            r_len = bslens[r_idx]
-            colors_u8 = np.empty((n_full, 3), dtype=np.uint8, order='F')
-            rc, gc_, bc = colors_u8[:, 0], colors_u8[:, 1], colors_u8[:, 2]
-
-        # Process ~10000 packets per chunk (~500 MB raw data)
-        CHUNK_PKTS = 10000
-        for chunk_start in range(0, n_pkts, CHUNK_PKTS):
-            chunk_end = min(chunk_start + CHUNK_PKTS, n_pkts)
-            chunk_n = chunk_end - chunk_start
-
-            # CRC strip this chunk's pages from the raw file buffer
-            c_log_start = first_pkt_log + chunk_start * pkt_size
-            c_log_end = first_pkt_log + chunk_end * pkt_size
-            c_start_page = _log_to_phys(c_log_start) // PAGE_SIZE
-            c_end_page = min(_log_to_phys(c_log_end) // PAGE_SIZE + 1,
-                             len(raw_arr) // PAGE_SIZE)
-            c_n_pages = c_end_page - c_start_page
-            c_region = raw_arr[c_start_page * PAGE_SIZE :
-                               c_end_page * PAGE_SIZE]
-            c_pages = c_region.reshape(c_n_pages, PAGE_SIZE)
+        while pos < section_end_log and not _all_filled():
+            c_end = min(pos + CHUNK_BYTES, section_end_log)
+            c_start_page = pos // DATA_PER_PAGE
+            c_end_page = min((c_end - 1) // DATA_PER_PAGE + 1, n_pages)
+            c_pages = raw_arr[c_start_page * PAGE_SIZE :
+                              c_end_page * PAGE_SIZE].reshape(-1, PAGE_SIZE)
             c_logical = np.ascontiguousarray(
                 c_pages[:, :DATA_PER_PAGE]).ravel()
-            c_local = c_log_start - c_start_page * DATA_PER_PAGE
-            d = c_logical[c_local:]
+            d = c_logical[pos - c_start_page * DATA_PER_PAGE :
+                          c_end - c_start_page * DATA_PER_PAGE]
+            d_len = len(d)
 
-            raw_view_dtype = np.uint32 if is_scaled else np.float32
+            o = 0
+            while o + 6 <= d_len:
+                ptype = int(d[o])
+                plen = (int(d[o + 2]) | (int(d[o + 3]) << 8)) + 1
+                if o + plen > d_len:
+                    break                   # continues in the next chunk
+                if ptype != 1:              # index / empty packet
+                    o += plen
+                    continue
 
-            # Extract fields from this chunk (F-order columns are contiguous)
-            for i in range(chunk_n):
-                o = i * pkt_size
-                pkt_idx = chunk_start + i
-                s = pkt_idx * pts_per_pkt
-                e = s + pts_per_pkt
-                xr[s:e] = d[o + x_off : o + x_off + x_len].view(raw_view_dtype)
-                yr[s:e] = d[o + y_off : o + y_off + x_len].view(raw_view_dtype)
-                zr[s:e] = d[o + z_off : o + z_off + x_len].view(raw_view_dtype)
-                if colors_u8 is not None:
-                    rc[s:e] = d[o + r_off : o + r_off + r_len]
-                    gc_[s:e] = d[o + g_off : o + g_off + r_len]
-                    bc[s:e] = d[o + b_off : o + b_off + r_len]
+                bcount = int(d[o + 4]) | (int(d[o + 5]) << 8)
+                hlen = 6 + 2 * bcount
+                hdr = d[o : o + hlen]
+                lens = struct.unpack_from(f'<{bcount}H', hdr.tobytes(), 6)
+                starts = [hlen]
+                for ln in lens[:-1]:
+                    starts.append(starts[-1] + ln)
 
-            del c_region, c_pages, c_logical, d
+                # Count consecutive packets with an identical header
+                # (same length and stream layout), growing the window
+                k_max = (d_len - o) // plen
+                run = d[o : o + k_max * plen].reshape(k_max, plen)
+                k, blk = 1, 16
+                while k < k_max:
+                    hi = min(k_max, k + blk)
+                    same = (run[k:hi, :hlen] == hdr).all(axis=1)
+                    if not same.all():
+                        k += int(np.argmin(same))
+                        break
+                    k = hi
+                    blk *= 4
 
-        # -- ScaledInteger → float32 conversion ----------------------------
-        if is_scaled:
-            scale_f = np.float64(xyz_scale)
-            min_f = np.float64(xyz_minimum)
-            off_f = np.float64(xyz_offset)
+                for t in targets:
+                    si, dest, need, filled = t
+                    ln = lens[si]
+                    if filled >= need or ln == 0:
+                        continue
+                    st = starts[si]
+                    kk = min(k, (need - filled) // ln)
+                    if kk:
+                        dest[filled : filled + kk * ln].reshape(kk, ln)[...] = \
+                            run[:kk, st : st + ln]
+                        filled += kk * ln
+                    if kk < k and filled < need:
+                        # Final partial packet for this stream (padding beyond)
+                        rem = min(need - filled, ln)
+                        dest[filled : filled + rem] = run[kk, st : st + rem]
+                        filled += rem
+                    t[3] = filled
 
-            # E57 ScaledInteger: stored as unsigned offset from minimum.
-            #   real = (stored_uint32 + minimum) * scale + offset
-            # minimum is negative (-2147483647), so uint32 + min gives
-            # the signed raw value.
-            xc[:] = ((xyz_raw[:, 0].astype(np.float64) + min_f) * scale_f
-                     + off_f).astype(np.float32)
-            yc[:] = ((xyz_raw[:, 1].astype(np.float64) + min_f) * scale_f
-                     + off_f).astype(np.float32)
-            zc[:] = ((xyz_raw[:, 2].astype(np.float64) + min_f) * scale_f
-                     + off_f).astype(np.float32)
-            del xyz_raw
+                o += k * plen
+                n_packets += k
+                n_runs += 1
+                if _all_filled():
+                    break
 
-            self._log(f"ScaledInteger → float32 conversion applied "
-                      f"(scale={xyz_scale:.2e}, {n_full:,} pts)")
+            if o == 0:
+                raise ValueError(f"Cannot parse data packet at log={pos}")
+            pos += o
+            del c_pages, c_logical, d
+
+        if not _all_filled():
+            raise ValueError("Data packets end before all records were read")
+        self._log(f"Packets: {n_packets} in {n_runs} uniform runs")
+
+        # -- 5. Decode non-direct fields -----------------------------------
+        for col, f in enumerate(xyz_names):
+            if f not in decode:
+                continue
+            p = proto[f]
+            if p['type'] == 'float':
+                xyz[:, col] = decode[f].view('<f8')[:n]
+            else:
+                # E57 stores unsigned offset from minimum:
+                #   real = (stored + minimum) * scale + offset
+                raw = self._unpack_bits(decode[f], n, p['bits'])
+                xyz[:, col] = ((raw.astype(np.float64) + np.float64(p['minimum']))
+                               * np.float64(p['scale'])
+                               + np.float64(p['offset'])).astype(np.float32)
+                del raw
+            self._log(f"{f}: {p['type']} {p['bits']}-bit decoded")
+        for col, f in enumerate(rgb_names):
+            if f not in decode:
+                continue
+            p = proto[f]
+            vals = self._unpack_bits(decode[f], n, p['bits']).astype(np.int64) + p['minimum']
+            if p['minimum'] < 0 or p['maximum'] > 255:
+                # Normalize wider color ranges to 0..255
+                vals = (vals - p['minimum']) * 255 // max(1, p['maximum'] - p['minimum'])
+            colors_u8[:, col] = vals.astype(np.uint8)
+        decode.clear()
 
         t_parse = time.time() - t0
         self._log(f"Chunked parse: {t_parse:.2f}s "
-                  f"({n_full / t_parse / 1e6:.1f} Mpts/s)")
+                  f"({n / max(t_parse, 1e-6) / 1e6:.1f} Mpts/s)")
 
         # Integrity check: reject if data is garbage
-        sample = xyz[::max(1, n_full // 10000)]
+        sample = xyz[::max(1, n // 10000)]
         if np.isnan(sample).any() or np.isinf(sample).any():
             del raw_arr
             gc.collect()
